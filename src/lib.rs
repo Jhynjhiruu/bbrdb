@@ -67,6 +67,10 @@ impl BBPlayer {
         })
     }
 
+    pub fn initialised(&self) -> bool {
+        self.is_initialised
+    }
+
     #[allow(non_snake_case)]
     pub fn Init(&mut self) -> Result<()> {
         self.set_seqno(0x01)?;
