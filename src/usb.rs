@@ -37,8 +37,8 @@ impl BBPlayer {
         let mut handle = device.open()?;
 
         #[cfg(not(target_os = "windows"))]
-        if handle.kernel_driver_active(Self::RDB_INTERFACE)? {
-            handle.detach_kernel_driver(Self::RDB_INTERFACE)?;
+        if handle.kernel_driver_active(RDB_INTERFACE)? {
+            handle.detach_kernel_driver(RDB_INTERFACE)?;
         }
 
         if !Self::is_correct_descriptor(device) {
