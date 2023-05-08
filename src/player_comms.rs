@@ -1,6 +1,8 @@
-use std::time::Duration;
-
-use crate::{commands::Command, num_from_arr, BBPlayer};
+use crate::{
+    commands::Command,
+    constants::{PACKET_SIZE, SEND_CHUNK_SIZE, TIMEOUT},
+    num_from_arr, BBPlayer,
+};
 use rusb::{Error, Result};
 
 #[repr(u8)]
@@ -20,20 +22,14 @@ impl BBPlayer {
 
     const PIECEMEAL_DATA_CHUNK_SIZE: usize = 3;
 
-    const TIMEOUT: Duration = Duration::SECOND;
-
-    const PACKET_SIZE: usize = 0x80;
-
-    const SEND_CHUNK_SIZE: usize = 0x100;
-
     pub fn send_chunked_data<T: AsRef<[u8]>>(&self, data: T) -> Result<()> {
-        for chunk in data.as_ref().chunks(Self::SEND_CHUNK_SIZE - 2) {
+        for chunk in data.as_ref().chunks(SEND_CHUNK_SIZE - 2) {
             let chunk_buf = [
                 &[TransferCommand::SendChunk as u8, chunk.len() as u8],
                 chunk,
             ]
             .concat();
-            self.bulk_transfer_send(chunk_buf, Self::TIMEOUT)?;
+            self.bulk_transfer_send(chunk_buf, TIMEOUT)?;
         }
 
         Ok(())
@@ -45,7 +41,7 @@ impl BBPlayer {
     }
 
     fn is_ready(&self) -> Result<bool> {
-        let buf = self.bulk_transfer_receive(4, Self::TIMEOUT)?;
+        let buf = self.bulk_transfer_receive(4, TIMEOUT)?;
         if buf.len() != 4 {
             Err(Error::Io)
         } else {
@@ -83,12 +79,12 @@ impl BBPlayer {
     }
 
     pub fn send_piecemeal_data<T: AsRef<[u8]>>(&self, data: T) -> Result<usize> {
-        self.bulk_transfer_send(Self::encode_piecemeal_data(data.as_ref()), Self::TIMEOUT)
+        self.bulk_transfer_send(Self::encode_piecemeal_data(data.as_ref()), TIMEOUT)
     }
 
-    pub(crate) fn send_command(&self, command: Command, arg: u32) -> Result<()> {
+    pub(crate) fn send_command(&self, command: u32, arg: u32) -> Result<()> {
         self.wait_ready()?;
-        let message = [(command as u32).to_be_bytes(), arg.to_be_bytes()].concat();
+        let message = [command.to_be_bytes(), arg.to_be_bytes()].concat();
         match self.send_piecemeal_data(message) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
@@ -96,13 +92,13 @@ impl BBPlayer {
     }
 
     fn send_ack(&self) -> Result<usize> {
-        self.bulk_transfer_send([TransferCommand::Ack as u8], Self::TIMEOUT)
+        self.bulk_transfer_send([TransferCommand::Ack as u8], TIMEOUT)
     }
 
     fn receive_data_length(&self) -> Result<usize> {
         let mut data;
         loop {
-            data = self.bulk_transfer_receive(4, Self::TIMEOUT)?;
+            data = self.bulk_transfer_receive(4, TIMEOUT)?;
             if data == Self::READY_SIGNAL {
                 eprintln!("Received unexpected ready signal");
                 continue;
@@ -119,13 +115,11 @@ impl BBPlayer {
         let mut buf = Vec::with_capacity(
             expected_len + (expected_len / 3) + (3 - (expected_len % 3)) % 3 + 1,
         );
-        let mut transferred = Self::PACKET_SIZE;
+        let mut transferred = PACKET_SIZE;
 
-        while transferred == Self::PACKET_SIZE {
-            let mut recv = self.bulk_transfer_receive(
-                Self::PACKET_SIZE.min(buf.capacity() - buf.len()),
-                Self::TIMEOUT,
-            )?;
+        while transferred == PACKET_SIZE {
+            let mut recv =
+                self.bulk_transfer_receive(PACKET_SIZE.min(buf.capacity() - buf.len()), TIMEOUT)?;
             transferred = recv.len();
             buf.append(&mut recv);
         }

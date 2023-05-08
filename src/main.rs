@@ -1,4 +1,4 @@
-use std::fs::write;
+use std::fs::{read, write};
 
 use bb::BBPlayer;
 use rusb::Result;
@@ -32,13 +32,33 @@ fn main() -> Result<()> {
     write("block0.bin", &block).unwrap();
     write("spare0.bin", &spare).unwrap();
     player.WriteSingleBlock(block, spare, 0)?;
-    let file = match player.ReadFile("00bbc0de.rec")? {
+    /*let file = match player.ReadFile("00bbc0de.rec")? {
         Some(b) => b,
         None => {
             eprintln!("File not found");
             vec![]
         }
     };
-    write("00bbc0de.rec", file).unwrap();
+    write("00bbc0de.rec", file).unwrap();*/
+    let file = read("current_fs.bin").unwrap();
+    player.WriteFile(&file, "test")?;
+    player.WriteFile(&file, "test.")?;
+    player.WriteFile(&file, "test.b")?;
+    player.WriteFile(&file, "test.bi")?;
+    player.WriteFile(&file, "test.bin")?;
+    player.WriteFile(&file, "testf.bin")?;
+    player.WriteFile(&file, "testfi.bin")?;
+    player.WriteFile(&file, "testfil.bin")?;
+    player.WriteFile(&file, "testfile.bin")?;
+
+    player.DeleteFile("test")?;
+    player.DeleteFile("test.")?;
+    player.DeleteFile("test.b")?;
+    player.DeleteFile("test.bi")?;
+    player.DeleteFile("test.bin")?;
+    player.DeleteFile("testf.bin")?;
+    player.DeleteFile("testfi.bin")?;
+    player.DeleteFile("testfil.bin")?;
+    player.DeleteFile("testfile.bin")?;
     Ok(())
 }

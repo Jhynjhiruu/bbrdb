@@ -10,6 +10,7 @@ use fs::FSBlock;
 use rusb::{Device, DeviceHandle, DeviceList, Error, GlobalContext, Result};
 
 pub(crate) mod commands;
+pub(crate) mod constants;
 mod fs;
 mod player_comms;
 mod usb;
@@ -161,11 +162,18 @@ impl BBPlayer {
         check_initialised!(self.is_initialised, { self.read_file(filename.as_ref()) })
     }
 
-    // WriteFile
+    #[allow(non_snake_case)]
+    pub fn WriteFile<T: AsRef<[u8]>, U: AsRef<str>>(&mut self, data: T, filename: U) -> Result<()> {
+        check_initialised!(self.is_initialised, {
+            self.write_file(data.as_ref(), filename.as_ref())
+        })
+    }
 
     #[allow(non_snake_case)]
     pub fn DeleteFile<T: AsRef<str>>(&mut self, filename: T) -> Result<()> {
-        check_initialised!(self.is_initialised, { self.delete_file(filename.as_ref()) })
+        check_initialised!(self.is_initialised, {
+            self.delete_file_and_update(filename.as_ref())
+        })
     }
 
     // PrintStats

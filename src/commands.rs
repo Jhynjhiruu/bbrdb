@@ -1,4 +1,9 @@
-use crate::{num_from_arr, BBPlayer};
+use std::ffi::CString;
+
+use crate::{
+    constants::{BLOCK_CHUNK_SIZE, BLOCK_SIZE, SPARE_SIZE},
+    num_from_arr, BBPlayer,
+};
 use rusb::{Error, Result};
 
 use indicatif::ProgressIterator;
@@ -38,10 +43,6 @@ macro_rules! try_continue {
 }
 
 impl BBPlayer {
-    const BLOCK_SIZE: usize = 0x4000;
-    const BLOCK_CHUNK_SIZE: usize = 0x1000;
-    const SPARE_SIZE: usize = 0x10;
-
     fn command_error(buf: &[u8]) -> bool {
         num_from_arr::<i32, _>(&buf[4..8]) < 0
     }
@@ -58,7 +59,7 @@ impl BBPlayer {
     }
 
     fn request_block_read(&self, command: Command, block_num: u32) -> Result<()> {
-        self.send_command(command, block_num)?;
+        self.send_command(command as u32, block_num)?;
         if Self::command_error(&self.receive_reply(8)?) {
             Err(Error::Io)
         } else {
@@ -67,15 +68,15 @@ impl BBPlayer {
     }
 
     fn get_block(&self) -> Result<Vec<u8>> {
-        let mut buf = Vec::with_capacity(Self::BLOCK_SIZE);
-        for _ in 0..(Self::BLOCK_SIZE / Self::BLOCK_CHUNK_SIZE) {
-            buf.extend(self.receive_reply(Self::BLOCK_CHUNK_SIZE)?);
+        let mut buf = Vec::with_capacity(BLOCK_SIZE);
+        for _ in 0..(BLOCK_SIZE / BLOCK_CHUNK_SIZE) {
+            buf.extend(self.receive_reply(BLOCK_CHUNK_SIZE)?);
         }
         Ok(buf)
     }
 
     fn get_spare(&self) -> Result<Vec<u8>> {
-        self.receive_reply(Self::SPARE_SIZE)
+        self.receive_reply(SPARE_SIZE)
     }
 
     pub(super) fn write_block_spare(
@@ -101,7 +102,7 @@ impl BBPlayer {
     }
 
     fn request_block_write(&self, command: Command, block_num: u32) -> Result<()> {
-        self.send_command(command, block_num)?;
+        self.send_command(command as u32, block_num)?;
         self.wait_ready()
     }
 
@@ -119,7 +120,7 @@ impl BBPlayer {
 
     fn send_spare(&self, data: &[u8]) -> Result<()> {
         self.wait_ready()?;
-        let data = [&data[..3], &[0xFF; Self::SPARE_SIZE - 3]].concat();
+        let data = [&data[..3], &[0xFF; SPARE_SIZE - 3]].concat();
         match self.send_piecemeal_data(data) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
@@ -127,7 +128,7 @@ impl BBPlayer {
     }
 
     pub(super) fn init_fs(&self) -> Result<()> {
-        self.send_command(Command::InitFS, 0x00)?;
+        self.send_command(Command::InitFS as u32, 0x00)?;
         if Self::command_error(&self.receive_reply(8)?) {
             Err(Error::Io)
         } else {
@@ -136,20 +137,66 @@ impl BBPlayer {
     }
 
     pub(super) fn get_num_blocks(&self) -> Result<u32> {
-        self.send_command(Command::GetNumBlocks, 0x00)?;
+        self.send_command(Command::GetNumBlocks as u32, 0x00)?;
         let reply = self.receive_reply(8)?;
         let size: u32 = num_from_arr(&reply[4..8]);
         Ok(size)
     }
 
     pub(super) fn set_seqno(&self, arg: u32) -> Result<()> {
-        self.send_command(Command::SetSeqNo, arg)?;
+        self.send_command(Command::SetSeqNo as u32, arg)?;
         self.receive_reply(8)?;
         Ok(())
     }
 
+    pub(super) fn file_checksum_cmp(&self, filename: &str, chksum: u32, size: u32) -> Result<bool> {
+        self.send_filename(filename)?;
+        self.send_params_and_receive_reply(chksum, size)
+    }
+
+    fn send_filename(&self, filename: &str) -> Result<()> {
+        let split = filename.split('.').collect::<Vec<_>>();
+        let (name, ext) = if split.len() > 1 {
+            (split[0], split[1])
+        } else {
+            (split[0], "")
+        };
+
+        if name.len() > 8 || ext.len() > 3 {
+            return Err(Error::Overflow);
+        }
+
+        let send_buf = match CString::new(filename) {
+            Ok(f) => f,
+            Err(_) => return Err(Error::InvalidParam),
+        };
+
+        self.send_command(
+            Command::FileChksum as u32,
+            send_buf.as_bytes_with_nul().len() as u32,
+        )?;
+
+        self.send_piecemeal_data(
+            [
+                send_buf.as_bytes_with_nul(),
+                &vec![0x00u8; (4 - (send_buf.as_bytes_with_nul().len() % 4)) % 4],
+            ]
+            .concat(),
+        )?;
+
+        //self.wait_ready()
+        Ok(())
+    }
+
+    fn send_params_and_receive_reply(&self, chksum: u32, size: u32) -> Result<bool> {
+        self.send_command(chksum, size)?;
+        self.wait_ready()?;
+        let reply = self.receive_reply(8)?;
+        Ok(num_from_arr::<i32, _>(&reply[4..8]) == 0)
+    }
+
     pub(super) fn set_led(&self, ledval: u32) -> Result<()> {
-        self.send_command(Command::SetLED, ledval)?;
+        self.send_command(Command::SetLED as u32, ledval)?;
         self.receive_reply(8)?;
         Ok(())
     }
@@ -157,7 +204,7 @@ impl BBPlayer {
     pub(super) fn set_time(&self, timedata: [u8; 8]) -> Result<()> {
         let first_half = num_from_arr(*timedata.split_array_ref::<4>().0);
         let second_half = &timedata[4..];
-        self.send_command(Command::SetTime, first_half)?;
+        self.send_command(Command::SetTime as u32, first_half)?;
         if Self::command_error(&self.receive_reply(8)?) {
             Err(Error::Io)
         } else {
@@ -167,7 +214,7 @@ impl BBPlayer {
     }
 
     pub(super) fn get_bbid(&self) -> Result<u32> {
-        self.send_command(Command::GetBBID, 0x00)?;
+        self.send_command(Command::GetBBID as u32, 0x00)?;
         let reply = self.receive_reply(8)?;
         if Self::command_error(&reply) {
             Err(Error::Io)
@@ -178,8 +225,8 @@ impl BBPlayer {
 
     pub(super) fn dump_nand_and_spare(&self) -> Result<BlockSpare> {
         let num_blocks = self.get_num_blocks()?;
-        let mut nand = Vec::with_capacity(num_blocks as usize * Self::BLOCK_SIZE);
-        let mut spare = Vec::with_capacity(num_blocks as usize * Self::SPARE_SIZE);
+        let mut nand = Vec::with_capacity(num_blocks as usize * BLOCK_SIZE);
+        let mut spare = Vec::with_capacity(num_blocks as usize * SPARE_SIZE);
         for block_num in (0..num_blocks).progress() {
             let (dumped_block, dumped_spare) = self.read_block_spare(block_num)?;
             nand.extend(dumped_block);

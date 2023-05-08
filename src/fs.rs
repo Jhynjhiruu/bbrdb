@@ -4,7 +4,10 @@ use std::{
     io::{Cursor, Seek},
 };
 
-use crate::{num_from_arr, BBPlayer};
+use crate::{
+    constants::{BLOCK_SIZE, SPARE_SIZE},
+    num_from_arr, BBPlayer,
+};
 use indicatif::{ProgressBar, ProgressStyle};
 use rusb::{Error, Result};
 
@@ -116,6 +119,26 @@ impl FileEntry {
         self.name[0] != 0 && self.valid == FileValid::Valid && self.start != FATEntry::EndOfChain
     }
 
+    fn set_filename(&mut self, filename: &str) -> Result<()> {
+        let split = filename.split('.').collect::<Vec<_>>();
+        let (name, ext) = if split.len() > 1 {
+            (split[0], split[1])
+        } else {
+            (split[0], "")
+        };
+
+        if name.len() > 8 || ext.len() > 3 {
+            return Err(Error::Overflow);
+        }
+
+        self.name
+            .copy_from_slice((name.to_owned() + &"\0".repeat(8 - name.len())).as_bytes());
+        self.ext
+            .copy_from_slice((ext.to_owned() + &"\0".repeat(3 - ext.len())).as_bytes());
+
+        Ok(())
+    }
+
     fn get_filename(&self) -> String {
         match self.name.iter().enumerate().find(|(_, &e)| e == 0) {
             Some((index, _)) => CString::new(&self.name[..index]),
@@ -180,6 +203,42 @@ impl BBPlayer {
                 }
             }
             Ok(None)
+        } else {
+            Err(Error::NoDevice)
+        }
+    }
+
+    fn rename_file(&mut self, from: &str, to: &str) -> Result<()> {
+        match self.get_file(from)? {
+            Some(f) => f.set_filename(to),
+            None => Err(Error::InvalidParam),
+        }
+    }
+
+    fn bytes_to_blocks(bytes: usize) -> usize {
+        (bytes + BLOCK_SIZE - 1) / BLOCK_SIZE
+    }
+
+    fn get_file_block_count(&self, filename: &str) -> Result<usize> {
+        if let Some(block) = &self.current_fs_block {
+            match self.find_file(filename)? {
+                Some(f) => Ok(Self::bytes_to_blocks(f.size as usize)),
+                None => Err(Error::InvalidParam),
+            }
+        } else {
+            Err(Error::NoDevice)
+        }
+    }
+
+    fn get_free_block_count(&self) -> Result<usize> {
+        if let Some(block) = &self.current_fs_block {
+            Ok(block.fat.iter().fold(0, |a, e| {
+                if matches!(e, FATEntry::Free) {
+                    a + 1
+                } else {
+                    a
+                }
+            }))
         } else {
             Err(Error::NoDevice)
         }
@@ -346,5 +405,155 @@ impl BBPlayer {
             None => return Ok(None),
         };
         self.read_blocks(file)
+    }
+
+    fn calculate_file_checksum(data: &[u8]) -> u32 {
+        data.iter().fold(0u32, |a, &e| a.wrapping_add(e as u32))
+    }
+
+    fn validate_file_write(
+        &mut self,
+        filename: &str,
+        chksum: u32,
+        required_blocks: usize,
+    ) -> Result<bool> {
+        match self.find_file(filename)? {
+            Some(_) => {
+                if self.file_checksum_cmp(
+                    filename,
+                    chksum,
+                    (required_blocks * BLOCK_SIZE) as u32,
+                )? {
+                    Ok(false)
+                } else {
+                    let block_count = self.get_file_block_count(filename)?;
+                    self.delete_file(filename)?;
+                    Ok(required_blocks < self.get_free_block_count()? + block_count)
+                }
+            }
+            None => Ok(required_blocks <= self.get_free_block_count()?),
+        }
+    }
+
+    fn write_file_blocks(
+        &self,
+        data: &[u8],
+        blocks_to_write: &[u16],
+        required_blocks: usize,
+    ) -> Result<()> {
+        const BLANK_SPARE: [u8; SPARE_SIZE] = [0xFF; SPARE_SIZE];
+
+        for (block, &index) in data.chunks(BLOCK_SIZE).zip(blocks_to_write) {
+            let mut block = block.to_vec();
+            block.extend(vec![0x00; BLOCK_SIZE - block.len()]);
+            self.write_block_spare(&block, &BLANK_SPARE, index.into())?;
+        }
+
+        Ok(())
+    }
+
+    fn find_blank_file_entry(&mut self) -> Result<&mut FileEntry> {
+        if let Some(block) = &mut self.current_fs_block {
+            for entry in &mut block.entries {
+                if !entry.valid() {
+                    return Ok(entry);
+                }
+            }
+            Err(Error::NoMem)
+        } else {
+            Err(Error::NoDevice)
+        }
+    }
+
+    fn write_file_entry(
+        &mut self,
+        filename: &str,
+        start_block: usize,
+        filesize: u32,
+    ) -> Result<()> {
+        let entry = self.find_blank_file_entry()?;
+        entry.set_filename(filename)?;
+        entry.valid = FileValid::Valid;
+        entry.start = FATEntry::Chain(start_block as u16);
+        entry.size = filesize;
+
+        Ok(())
+    }
+
+    fn find_next_free_block(&self, start_at: usize) -> Result<usize> {
+        if let Some(block) = &self.current_fs_block {
+            for (index, i) in block.fat.iter().enumerate() {
+                if matches!(i, FATEntry::Free) {
+                    return Ok(index);
+                }
+            }
+            Err(Error::NoMem)
+        } else {
+            Err(Error::NoDevice)
+        }
+    }
+
+    fn update_fs_links(&mut self, start_block: usize, required_blocks: usize) -> Result<Vec<u16>> {
+        let mut free_blocks = Vec::with_capacity(required_blocks);
+        free_blocks.push(start_block as u16);
+        let mut prev = required_blocks as u16;
+        for _ in 0..required_blocks - 1 {
+            let next = self.find_next_free_block(prev as usize + 1)? as u16;
+            free_blocks.push(next);
+            prev = next;
+        }
+        if let Some(block) = &mut self.current_fs_block {
+            let mut current_block = free_blocks[0];
+            for &next_block in &free_blocks[1..free_blocks.len()] {
+                block.fat[current_block as usize] = FATEntry::Chain(next_block);
+
+                current_block = next_block;
+            }
+            block.fat[current_block as usize] = FATEntry::EndOfChain;
+
+            Ok(free_blocks)
+        } else {
+            Err(Error::NoDevice)
+        }
+    }
+
+    fn write_blocks_to_temp_file(&mut self, data: &[u8], required_blocks: usize) -> Result<()> {
+        let start_block = self.find_next_free_block(0x40)?;
+        self.write_file_entry(
+            "temp.tmp",
+            start_block,
+            (required_blocks * BLOCK_SIZE) as u32,
+        )?;
+
+        let blocks_to_write = self.update_fs_links(start_block, required_blocks)?;
+        self.write_file_blocks(data, &blocks_to_write, required_blocks)
+    }
+
+    fn check_and_cleanup_temp_file(
+        &mut self,
+        filename: &str,
+        chksum: u32,
+        required_blocks: usize,
+    ) -> Result<()> {
+        if self.file_checksum_cmp("temp.tmp", chksum, (required_blocks * BLOCK_SIZE) as u32)? {
+            self.rename_file("temp.tmp", filename)
+        } else {
+            Err(Error::Io)
+        }
+    }
+
+    pub(super) fn write_file(&mut self, data: &[u8], filename: &str) -> Result<()> {
+        let chksum = Self::calculate_file_checksum(data);
+        let required_blocks = Self::bytes_to_blocks(data.len());
+
+        self.validate_file_write(filename, chksum, required_blocks)?;
+        self.write_blocks_to_temp_file(data, required_blocks)?;
+        self.update_fs()?;
+
+        self.check_and_cleanup_temp_file(filename, chksum, required_blocks)?;
+
+        self.update_fs()?;
+
+        Ok(())
     }
 }
