@@ -37,7 +37,7 @@ impl BBPlayer {
         let mut handle = device.open()?;
 
         #[cfg(not(target_os = "windows"))]
-        if handle.kernel_driver_active(RDB_INTERFACE)? {
+        if rusb::supports_detach_kernel_driver() && handle.kernel_driver_active(RDB_INTERFACE)? {
             handle.detach_kernel_driver(RDB_INTERFACE)?;
         }
 
@@ -59,7 +59,9 @@ impl BBPlayer {
     pub fn close_connection(&mut self) -> Result<()> {
         self.handle.release_interface(RDB_INTERFACE)?;
         #[cfg(not(target_os = "windows"))]
-        self.handle.attach_kernel_driver(RDB_INTERFACE)?;
+        if rusb::supports_detach_kernel_driver() {
+            self.handle.attach_kernel_driver(RDB_INTERFACE)?;
+        }
         Ok(())
     }
 
