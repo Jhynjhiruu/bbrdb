@@ -383,7 +383,7 @@ impl BBPlayer {
                 FATEntry::BadBlock => (a, b, c + 1),
                 _ => (a, b + 1, c),
             });
-            Ok((free, used, bad, block.footer.seqno - 0xFF0))
+            Ok((free, used, bad, block.footer.seqno))
         } else {
             Err(Error::NoDevice)
         }
