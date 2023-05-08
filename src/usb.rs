@@ -43,6 +43,10 @@ impl BBPlayer {
             handle.detach_kernel_driver(RDB_INTERFACE).unwrap();
         }
 
+        handle
+            .set_active_configuration(RDB_CONF_DESCRIPTOR)
+            .unwrap();
+
         if !Self::is_correct_descriptor(device) {
             return Err(Error::BadDescriptor);
         }
