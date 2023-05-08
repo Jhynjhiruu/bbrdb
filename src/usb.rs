@@ -34,26 +34,22 @@ impl BBPlayer {
     }
 
     pub fn open_device(device: &Device<GlobalContext>) -> Result<DeviceHandle<GlobalContext>> {
-        let mut handle = device.open().unwrap();
+        let mut handle = device.open()?;
 
         #[cfg(not(target_os = "windows"))]
-        if rusb::supports_detach_kernel_driver()
-            && handle.kernel_driver_active(RDB_INTERFACE).unwrap()
-        {
-            handle.detach_kernel_driver(RDB_INTERFACE).unwrap();
+        if rusb::supports_detach_kernel_driver() && handle.kernel_driver_active(RDB_INTERFACE)? {
+            handle.detach_kernel_driver(RDB_INTERFACE)?;
         }
 
-        handle
-            .set_active_configuration(RDB_CONF_DESCRIPTOR)
-            .unwrap();
+        handle.set_active_configuration(RDB_CONF_DESCRIPTOR)?;
 
         if !Self::is_correct_descriptor(device) {
             return Err(Error::BadDescriptor);
         }
 
-        handle.claim_interface(RDB_INTERFACE).unwrap();
-        handle.clear_halt(RDB_BULK_EP_IN).unwrap();
-        handle.clear_halt(RDB_BULK_EP_OUT).unwrap();
+        handle.claim_interface(RDB_INTERFACE)?;
+        handle.clear_halt(RDB_BULK_EP_IN)?;
+        handle.clear_halt(RDB_BULK_EP_OUT)?;
 
         if !Self::is_correct_descriptor(device) {
             return Err(Error::BadDescriptor);
