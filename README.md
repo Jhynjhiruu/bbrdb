@@ -4,7 +4,7 @@ Rust library for interacting with the iQue Player over USB.
 ### License
 Copyright © 2023 Jhynjhiruu (https://github.com/Jhynjhiruu)
 
-libbb is licensed under the GPL v2 (or any later version).
+libbb is licensed under the GPL v3 (or any later version).
 
 
 libbb based on aulon by Jbop; copyright notice reproduced here:
