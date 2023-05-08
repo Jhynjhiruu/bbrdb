@@ -376,6 +376,19 @@ impl BBPlayer {
         self.update_fs()
     }
 
+    pub(super) fn get_stats(&self) -> Result<(usize, usize, usize, u32)> {
+        if let Some(block) = &self.current_fs_block {
+            let (free, used, bad) = block.fat.iter().fold((0, 0, 0), |(a, b, c), e| match e {
+                FATEntry::Free => (a + 1, b, c),
+                FATEntry::BadBlock => (a, b, c + 1),
+                _ => (a, b + 1, c),
+            });
+            Ok((free, used, bad, block.footer.seqno - 0xFF0))
+        } else {
+            Err(Error::NoDevice)
+        }
+    }
+
     fn read_blocks(&self, file: &FileEntry) -> Result<Option<Vec<u8>>> {
         if let Some(block) = &self.current_fs_block {
             let mut filebuf = Vec::with_capacity(file.size as usize);

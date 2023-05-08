@@ -60,5 +60,8 @@ fn main() -> Result<()> {
     player.DeleteFile("test.")?;
     player.DeleteFile("test")?;
 
+    let (free, used, bad, seqno) = player.GetStats()?;
+    println!("Free: {free} (0x{free:04X})\nUsed: {used} (0x{used:04X})\nBad: {bad} (0x{bad:04X})\nSequence Number: {seqno}");
+
     Ok(())
 }

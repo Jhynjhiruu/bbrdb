@@ -176,7 +176,10 @@ impl BBPlayer {
         })
     }
 
-    // PrintStats
+    #[allow(non_snake_case)]
+    pub fn GetStats(&self) -> Result<(usize, usize, usize, u32)> {
+        check_initialised!(self.is_initialised, { self.get_stats() })
+    }
 
     #[allow(non_snake_case)]
     pub fn Close(&mut self) -> Result<()> {
