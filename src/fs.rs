@@ -185,7 +185,7 @@ impl BBPlayer {
         }
     }
 
-    pub(super) fn dump_current_fs(&self) -> Result<()> {
+    pub(super) fn dump_current_fs(&self) -> Result<Vec<u8>> {
         if let Some(b) = &self.current_fs_block {
             let block = match b.write() {
                 Ok(bl) => bl,
@@ -194,10 +194,7 @@ impl BBPlayer {
                     return Err(Error::Io);
                 }
             };
-            match write("current_fs.bin", block) {
-                Ok(_) => Ok(()),
-                Err(_) => Err(Error::Io),
-            }
+            Ok(block)
         } else {
             Err(Error::NoDevice)
         }

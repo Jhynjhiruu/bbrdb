@@ -128,7 +128,7 @@ impl BBPlayer {
     }
 
     #[allow(non_snake_case)]
-    pub fn DumpCurrentFS(&self) -> Result<()> {
+    pub fn DumpCurrentFS(&self) -> Result<Vec<u8>> {
         check_initialised!(self.is_initialised, { self.dump_current_fs() })
     }
 

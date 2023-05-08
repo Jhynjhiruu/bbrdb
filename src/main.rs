@@ -24,7 +24,7 @@ fn main() -> Result<()> {
     for file in files {
         println!("{:>12}: {}", file.0, file.1);
     }
-    player.DumpCurrentFS()?;
+    write("current_fs.bin", player.DumpCurrentFS()?).unwrap();
     /*let (nand, spare) = player.DumpNAND()?;
     write("nand.bin", nand).unwrap();
     write("spare.bin", spare).unwrap();*/
