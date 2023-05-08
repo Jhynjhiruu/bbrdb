@@ -50,15 +50,15 @@ fn main() -> Result<()> {
     player.WriteFile(&file, "testfi.bin")?;
     player.WriteFile(&file, "testfil.bin")?;
     player.WriteFile(&file, "testfile.bin")?;
-
-    player.DeleteFile("test")?;
-    player.DeleteFile("test.")?;
-    player.DeleteFile("test.b")?;
-    player.DeleteFile("test.bi")?;
-    player.DeleteFile("test.bin")?;
-    player.DeleteFile("testf.bin")?;
-    player.DeleteFile("testfi.bin")?;
-    player.DeleteFile("testfil.bin")?;
     player.DeleteFile("testfile.bin")?;
+    player.DeleteFile("testfil.bin")?;
+    player.DeleteFile("testfi.bin")?;
+    player.DeleteFile("testf.bin")?;
+    player.DeleteFile("test.bin")?;
+    player.DeleteFile("test.bi")?;
+    player.DeleteFile("test.b")?;
+    player.DeleteFile("test.")?;
+    player.DeleteFile("test")?;
+
     Ok(())
 }

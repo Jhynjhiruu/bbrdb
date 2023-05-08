@@ -36,7 +36,7 @@ impl BBPlayer {
     pub fn open_device(device: &Device<GlobalContext>) -> Result<DeviceHandle<GlobalContext>> {
         let mut handle = device.open()?;
 
-        #[cfg(target_os = "linux")]
+        #[cfg(not(target_os = "windows"))]
         if handle.kernel_driver_active(Self::RDB_INTERFACE)? {
             handle.detach_kernel_driver(Self::RDB_INTERFACE)?;
         }
@@ -58,8 +58,8 @@ impl BBPlayer {
 
     pub fn close_connection(&mut self) -> Result<()> {
         self.handle.release_interface(RDB_INTERFACE)?;
-        #[cfg(target_os = "linux")]
-        self.handle.attach_kernel_driver(Self::RDB_INTERFACE)?;
+        #[cfg(not(target_os = "windows"))]
+        self.handle.attach_kernel_driver(RDB_INTERFACE)?;
         Ok(())
     }
 
