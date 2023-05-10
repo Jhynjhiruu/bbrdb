@@ -1,6 +1,7 @@
 use std::fs::{read, write};
 
 use bb::BBPlayer;
+use chrono::Local;
 use rusb::Result;
 
 fn main() -> Result<()> {
@@ -11,7 +12,7 @@ fn main() -> Result<()> {
     player.Init()?;
     println!("{:04X}", player.GetBBID()?);
     player.SetLED(4)?;
-    player.SetTime()?;
+    player.SetTime(Local::now())?;
     let blocks = match player.ListFileBlocks("hackit.sys")? {
         Some(b) => b,
         None => {

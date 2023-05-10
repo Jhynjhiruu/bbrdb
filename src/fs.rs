@@ -1,6 +1,5 @@
 use std::{
     ffi::CString,
-    fs::write,
     io::{Cursor, Seek},
 };
 
@@ -78,7 +77,7 @@ impl FSBlock {
         let mut cursor = Cursor::new(data.as_ref());
         match <_>::read_be(&mut cursor) {
             Ok(fs) => {
-                /*if data.as_ref().chunks(2).fold(0u16, |a, e| {
+                if data.as_ref().chunks(2).fold(0u16, |a, e| {
                     a.wrapping_add(u16::from_be_bytes(*e.split_array_ref().0))
                 }) != 0xCAD7
                 {
@@ -86,8 +85,7 @@ impl FSBlock {
                         pos: 0x3FFE,
                         message: "Invalid checksum".to_string(),
                     })
-                } else */
-                {
+                } else {
                     Ok(fs)
                 }
             }
@@ -220,13 +218,9 @@ impl BBPlayer {
     }
 
     fn get_file_block_count(&self, filename: &str) -> Result<usize> {
-        if let Some(block) = &self.current_fs_block {
-            match self.find_file(filename)? {
-                Some(f) => Ok(Self::bytes_to_blocks(f.size as usize)),
-                None => Err(Error::InvalidParam),
-            }
-        } else {
-            Err(Error::NoDevice)
+        match self.find_file(filename)? {
+            Some(f) => Ok(Self::bytes_to_blocks(f.size as usize)),
+            None => Err(Error::InvalidParam),
         }
     }
 
@@ -456,7 +450,13 @@ impl BBPlayer {
     ) -> Result<()> {
         const BLANK_SPARE: [u8; SPARE_SIZE] = [0xFF; SPARE_SIZE];
 
-        for (block, &index) in data.chunks(BLOCK_SIZE).zip(blocks_to_write) {
+        let chunks = data.chunks(BLOCK_SIZE);
+
+        if blocks_to_write.len() != chunks.len() || blocks_to_write.len() != required_blocks {
+            return Err(Error::InvalidParam);
+        }
+
+        for (block, &index) in chunks.zip(blocks_to_write) {
             let mut block = block.to_vec();
             block.extend(vec![0x00; BLOCK_SIZE - block.len()]);
             self.write_block_spare(&block, &BLANK_SPARE, index.into())?;
@@ -495,7 +495,7 @@ impl BBPlayer {
 
     fn find_next_free_block(&self, start_at: usize) -> Result<usize> {
         if let Some(block) = &self.current_fs_block {
-            for (index, i) in block.fat.iter().enumerate() {
+            for (index, i) in block.fat[start_at..].iter().enumerate() {
                 if matches!(i, FATEntry::Free) {
                     return Ok(index);
                 }

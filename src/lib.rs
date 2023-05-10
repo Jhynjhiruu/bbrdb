@@ -98,18 +98,17 @@ impl BBPlayer {
     // signhash
 
     #[allow(non_snake_case)]
-    pub fn SetTime(&self) -> Result<()> {
+    pub fn SetTime<Tz: TimeZone>(&self, when: DateTime<Tz>) -> Result<()> {
         check_initialised!(self.is_initialised, {
-            let now = Local::now();
             let timedata = [
-                (now.year() % 100) as u8,
-                now.month() as u8,
-                now.day() as u8,
-                now.weekday() as u8,
+                (when.year() % 100) as u8,
+                when.month() as u8,
+                when.day() as u8,
+                when.weekday() as u8,
                 0,
-                now.hour() as u8,
-                now.minute() as u8,
-                now.second() as u8,
+                when.hour() as u8,
+                when.minute() as u8,
+                when.second() as u8,
             ];
 
             self.set_time(timedata)
