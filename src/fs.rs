@@ -456,10 +456,18 @@ impl BBPlayer {
             return Err(Error::InvalidParam);
         }
 
+        let bar = ProgressBar::new((blocks_to_write.len() * BLOCK_SIZE) as u64).with_style(
+            ProgressStyle::with_template(
+                "{wide_bar} {bytes}/{total_bytes}, eta {eta} ({binary_bytes_per_sec})",
+            )
+            .unwrap(),
+        );
+
         for (block, &index) in chunks.zip(blocks_to_write) {
             let mut block = block.to_vec();
             block.extend(vec![0x00; BLOCK_SIZE - block.len()]);
             self.write_block_spare(&block, &BLANK_SPARE, index.into())?;
+            bar.inc(BLOCK_SIZE as u64);
         }
 
         Ok(())
@@ -510,11 +518,23 @@ impl BBPlayer {
         let mut free_blocks = Vec::with_capacity(required_blocks);
         free_blocks.push(start_block as u16);
         let mut prev = required_blocks as u16;
+
+        let bar = ProgressBar::new(required_blocks as u64).with_style(
+            ProgressStyle::with_template(
+                "{wide_bar} {bytes}/{total_bytes}, eta {eta} ({binary_bytes_per_sec})",
+            )
+            .unwrap(),
+        );
+
         for _ in 0..required_blocks - 1 {
             let next = self.find_next_free_block(prev as usize + 1)? as u16;
             free_blocks.push(next);
+            bar.inc(1);
             prev = next;
         }
+
+        bar.inc(1);
+
         if let Some(block) = &mut self.current_fs_block {
             let mut current_block = free_blocks[0];
             for &next_block in &free_blocks[1..free_blocks.len()] {
