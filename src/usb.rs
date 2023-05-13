@@ -68,14 +68,19 @@ impl BBPlayer {
     }
 
     pub fn bulk_transfer_send<T: AsRef<[u8]>>(&self, data: T, timeout: Duration) -> Result<usize> {
+        //println!("send {:x?}", data.as_ref());
         self.handle
             .write_bulk(RDB_BULK_EP_OUT, data.as_ref(), timeout)
     }
 
     pub fn bulk_transfer_receive(&self, length: usize, timeout: Duration) -> Result<Vec<u8>> {
         let mut buf = vec![0; length];
+        //println!("expc {length:x}");
         match self.handle.read_bulk(RDB_BULK_EP_IN, &mut buf, timeout) {
-            Ok(n) => Ok(buf[..n].to_vec()),
+            Ok(n) => {
+                //println!("recv {:x?}", &buf[..n]);
+                Ok(buf[..n].to_vec())
+            }
             Err(e) => Err(e),
         }
     }

@@ -450,6 +450,11 @@ impl BBPlayer {
     ) -> Result<()> {
         const BLANK_SPARE: [u8; SPARE_SIZE] = [0xFF; SPARE_SIZE];
 
+        assert!(
+            blocks_to_write.iter().all(|e| (0x40..0xFF0).contains(e)),
+            "Trying to write to SKSA or FAT area!"
+        );
+
         let chunks = data.chunks(BLOCK_SIZE);
 
         if blocks_to_write.len() != chunks.len() || blocks_to_write.len() != required_blocks {
@@ -462,8 +467,6 @@ impl BBPlayer {
             )
             .unwrap(),
         );
-
-        println!("Writing blocks...");
 
         for (block, &index) in chunks.zip(blocks_to_write) {
             let mut block = block.to_vec();
@@ -507,7 +510,7 @@ impl BBPlayer {
         if let Some(block) = &self.current_fs_block {
             for (index, i) in block.fat[start_at..].iter().enumerate() {
                 if matches!(i, FATEntry::Free) {
-                    return Ok(index);
+                    return Ok(index + start_at);
                 }
             }
             Err(Error::NoMem)
@@ -519,7 +522,7 @@ impl BBPlayer {
     fn update_fs_links(&mut self, start_block: usize, required_blocks: usize) -> Result<Vec<u16>> {
         let mut free_blocks = Vec::with_capacity(required_blocks);
         free_blocks.push(start_block as u16);
-        let mut prev = required_blocks as u16;
+        let mut prev = start_block as u16;
 
         let bar = ProgressBar::new(required_blocks as u64).with_style(
             ProgressStyle::with_template(
@@ -561,7 +564,6 @@ impl BBPlayer {
         )?;
 
         let blocks_to_write = self.update_fs_links(start_block, required_blocks)?;
-        println!("{} blocks", blocks_to_write.len());
         self.write_file_blocks(data, &blocks_to_write, required_blocks)
     }
 
@@ -582,7 +584,9 @@ impl BBPlayer {
         let chksum = Self::calculate_file_checksum(data);
         let required_blocks = Self::bytes_to_blocks(data.len());
 
-        self.validate_file_write(filename, chksum, required_blocks)?;
+        if !self.validate_file_write(filename, chksum, required_blocks)? {
+            return Ok(());
+        };
         self.write_blocks_to_temp_file(data, required_blocks)?;
         self.update_fs()?;
 

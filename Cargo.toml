@@ -12,4 +12,5 @@ binrw = "0.11.1"
 chrono = "0.4.24"
 indicatif = "0.17.3"
 num-traits = "0.2.15"
-rusb = { path = "D:/GitHub/rusb" }
+#rusb = { path = "D:/GitHub/rusb" }
+rusb = "0.9.1"

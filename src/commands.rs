@@ -176,6 +176,8 @@ impl BBPlayer {
             send_buf.as_bytes_with_nul().len() as u32,
         )?;
 
+        self.wait_ready()?;
+
         self.send_piecemeal_data(
             [
                 send_buf.as_bytes_with_nul(),
@@ -190,7 +192,7 @@ impl BBPlayer {
 
     fn send_params_and_receive_reply(&self, chksum: u32, size: u32) -> Result<bool> {
         self.send_command(chksum, size)?;
-        self.wait_ready()?;
+        //self.wait_ready()?;
         let reply = self.receive_reply(8)?;
         Ok(num_from_arr::<i32, _>(&reply[4..8]) == 0)
     }
