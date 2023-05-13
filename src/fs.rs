@@ -463,6 +463,8 @@ impl BBPlayer {
             .unwrap(),
         );
 
+        println!("Writing blocks...");
+
         for (block, &index) in chunks.zip(blocks_to_write) {
             let mut block = block.to_vec();
             block.extend(vec![0x00; BLOCK_SIZE - block.len()]);
@@ -559,6 +561,7 @@ impl BBPlayer {
         )?;
 
         let blocks_to_write = self.update_fs_links(start_block, required_blocks)?;
+        println!("{} blocks", blocks_to_write.len());
         self.write_file_blocks(data, &blocks_to_write, required_blocks)
     }
 
