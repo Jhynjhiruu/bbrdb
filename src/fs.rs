@@ -5,10 +5,10 @@ use std::{
 
 use crate::{
     constants::{BLOCK_SIZE, SPARE_SIZE},
+    error::{LibBBError, Result},
     num_from_arr, BBPlayer,
 };
 use indicatif::{ProgressBar, ProgressStyle};
-use rusb::{Error, Result};
 
 use binrw::{binrw, BinReaderExt, BinResult, BinWriterExt};
 
@@ -77,8 +77,9 @@ impl FSBlock {
         let mut cursor = Cursor::new(data.as_ref());
         match <_>::read_be(&mut cursor) {
             Ok(fs) => {
-                if data.as_ref().chunks(2).fold(0u16, |a, e| {
-                    a.wrapping_add(u16::from_be_bytes(*e.split_array_ref().0))
+                if data.as_ref().chunks(2).fold(0u16, |a, e| match e {
+                    &[upper, lower] => a.wrapping_add(u16::from_be_bytes([upper, lower])),
+                    _ => unreachable!(),
                 }) != 0xCAD7
                 {
                     Err(binrw::Error::AssertFail {
@@ -126,7 +127,7 @@ impl FileEntry {
         };
 
         if name.len() > 8 || ext.len() > 3 {
-            return Err(Error::Overflow);
+            return Err(LibBBError::FileNameTooLong(filename.to_string()));
         }
 
         self.name
@@ -189,7 +190,7 @@ impl BBPlayer {
             }
             Ok(None)
         } else {
-            Err(Error::NoDevice)
+            Err(LibBBError::NoFSBlock)
         }
     }
 
@@ -202,14 +203,14 @@ impl BBPlayer {
             }
             Ok(None)
         } else {
-            Err(Error::NoDevice)
+            Err(LibBBError::NoFSBlock)
         }
     }
 
     fn rename_file(&mut self, from: &str, to: &str) -> Result<()> {
         match self.get_file(from)? {
             Some(f) => f.set_filename(to),
-            None => Err(Error::InvalidParam),
+            None => Err(LibBBError::FileNotFound(from.to_string())),
         }
     }
 
@@ -220,7 +221,7 @@ impl BBPlayer {
     fn get_file_block_count(&self, filename: &str) -> Result<usize> {
         match self.find_file(filename)? {
             Some(f) => Ok(Self::bytes_to_blocks(f.size as usize)),
-            None => Err(Error::InvalidParam),
+            None => Err(LibBBError::FileNotFound(filename.to_string())),
         }
     }
 
@@ -234,7 +235,7 @@ impl BBPlayer {
                 }
             }))
         } else {
-            Err(Error::NoDevice)
+            Err(LibBBError::NoFSBlock)
         }
     }
 
@@ -242,14 +243,11 @@ impl BBPlayer {
         if let Some(b) = &self.current_fs_block {
             let block = match b.write() {
                 Ok(bl) => bl,
-                Err(e) => {
-                    eprintln!("{e}");
-                    return Err(Error::Io);
-                }
+                Err(e) => return Err(e.into()),
             };
             Ok(block)
         } else {
-            Err(Error::NoDevice)
+            Err(LibBBError::NoFSBlock)
         }
     }
 
@@ -267,16 +265,13 @@ impl BBPlayer {
         if let Some(b) = &self.current_fs_block {
             let block = match b.write() {
                 Ok(bl) => bl,
-                Err(e) => {
-                    eprintln!("{e}");
-                    return Err(Error::Io);
-                }
+                Err(e) => return Err(e.into()),
             };
             self.write_block_spare(&block, &self.current_fs_spare, next_index)?;
 
             self.init_fs()
         } else {
-            Err(Error::Io)
+            Err(LibBBError::NoFSBlock)
         }
     }
 
@@ -286,10 +281,7 @@ impl BBPlayer {
         if seqno > current_seqno {
             self.current_fs_block = match FSBlock::read(&block) {
                 Ok(b) => Some(b),
-                Err(e) => {
-                    eprintln!("{e}");
-                    return Err(Error::Io);
-                }
+                Err(e) => return Err(e.into()),
             };
             self.current_fs_spare = spare;
             self.current_fs_index = block_num - 0xFF0;
@@ -321,7 +313,7 @@ impl BBPlayer {
             }
             Ok(Some(rv))
         } else {
-            Err(Error::NoDevice)
+            Err(LibBBError::NoFSBlock)
         }
     }
 
@@ -339,7 +331,7 @@ impl BBPlayer {
                 })
                 .collect::<Vec<_>>())
         } else {
-            Err(Error::NoDevice)
+            Err(LibBBError::NoFSBlock)
         }
     }
 
@@ -379,7 +371,7 @@ impl BBPlayer {
             });
             Ok((free, used, bad, block.footer.seqno))
         } else {
-            Err(Error::NoDevice)
+            Err(LibBBError::NoFSBlock)
         }
     }
 
@@ -402,7 +394,7 @@ impl BBPlayer {
             }
             Ok(Some(filebuf))
         } else {
-            Err(Error::NoDevice)
+            Err(LibBBError::NoFSBlock)
         }
     }
 
@@ -458,7 +450,11 @@ impl BBPlayer {
         let chunks = data.chunks(BLOCK_SIZE);
 
         if blocks_to_write.len() != chunks.len() || blocks_to_write.len() != required_blocks {
-            return Err(Error::InvalidParam);
+            return Err(LibBBError::IncorrectNumBlocks(
+                required_blocks,
+                chunks.len(),
+                blocks_to_write.len(),
+            ));
         }
 
         let bar = ProgressBar::new((blocks_to_write.len() * BLOCK_SIZE) as u64).with_style(
@@ -485,9 +481,9 @@ impl BBPlayer {
                     return Ok(entry);
                 }
             }
-            Err(Error::NoMem)
+            Err(LibBBError::NoEmptyFileSlots)
         } else {
-            Err(Error::NoDevice)
+            Err(LibBBError::NoFSBlock)
         }
     }
 
@@ -513,9 +509,9 @@ impl BBPlayer {
                     return Ok(index + start_at);
                 }
             }
-            Err(Error::NoMem)
+            Err(LibBBError::NoFreeBlocks)
         } else {
-            Err(Error::NoDevice)
+            Err(LibBBError::NoFSBlock)
         }
     }
 
@@ -551,7 +547,7 @@ impl BBPlayer {
 
             Ok(free_blocks)
         } else {
-            Err(Error::NoDevice)
+            Err(LibBBError::NoFSBlock)
         }
     }
 
@@ -576,7 +572,7 @@ impl BBPlayer {
         if self.file_checksum_cmp("temp.tmp", chksum, (required_blocks * BLOCK_SIZE) as u32)? {
             self.rename_file("temp.tmp", filename)
         } else {
-            Err(Error::Io)
+            Err(LibBBError::ChecksumFailed(filename.to_string(), chksum))
         }
     }
 

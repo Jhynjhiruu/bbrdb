@@ -1,11 +1,11 @@
 use crate::{
     constants::{PACKET_SIZE, SEND_CHUNK_SIZE, TIMEOUT},
+    error::{LibBBError, Result},
     num_from_arr, BBPlayer,
 };
-use rusb::{Error, Result};
 
 #[repr(u8)]
-enum TransferCommand {
+pub(crate) enum TransferCommand {
     Ready = 0x15,
 
     PiecemealChunkRecv = 0x1C,
@@ -42,7 +42,7 @@ impl BBPlayer {
     fn is_ready(&self) -> Result<bool> {
         let buf = self.bulk_transfer_receive(4, TIMEOUT)?;
         if buf.len() != 4 {
-            Err(Error::Io)
+            Err(LibBBError::TransferLength(4, buf.len()))
         } else {
             Ok(buf == Self::READY_SIGNAL)
         }
@@ -63,11 +63,11 @@ impl BBPlayer {
         while buf.len() < expected_len && let Some(&tu) = it.next() {
             match tu {
                 0x1D..=0x1F => {
-                    for _ in TransferCommand::PiecemealChunkRecv as u8..tu {
-                        buf.push(*it.next().ok_or(Error::InvalidParam)?);
+                    for i in TransferCommand::PiecemealChunkRecv as u8..tu {
+                        buf.push(*it.next().ok_or(LibBBError::PiecemealChunkTooShort(tu, i))?);
                     }
                 }
-                _ => return Err(Error::Io),
+                _ => return Err(LibBBError::UnexpectedPiecemealChunkType(tu)),
             }
         }
         assert!(
@@ -103,7 +103,10 @@ impl BBPlayer {
                 continue;
             }
             if data.len() != 4 || data[0] != 0x1B {
-                return Err(Error::Io);
+                return Err(LibBBError::IncorrectDataLengthReply(
+                    if !data.is_empty() { Some(data[0]) } else { None },
+                    data.len(),
+                ));
             }
             break;
         }
@@ -129,7 +132,10 @@ impl BBPlayer {
     pub fn receive_reply(&self, expected_len: usize) -> Result<Vec<u8>> {
         let data_length = self.receive_data_length()?;
         if data_length == 0 || data_length > expected_len {
-            Err(Error::InvalidParam)
+            Err(LibBBError::InvalidReplyLength(
+                expected_len,
+                data_length,
+            ))
         } else {
             self.receive_data(data_length)
         }

@@ -6,11 +6,13 @@ use chrono::prelude::*;
 use commands::BlockSpare;
 use std::mem::size_of;
 
+use error::{LibBBError, Result};
 use fs::FSBlock;
-use rusb::{Device, DeviceHandle, DeviceList, Error, GlobalContext, Result};
+use rusb::{Device, DeviceHandle, DeviceList, GlobalContext};
 
 pub(crate) mod commands;
 pub(crate) mod constants;
+pub mod error;
 mod fs;
 mod player_comms;
 mod usb;
@@ -42,20 +44,30 @@ from_be!(u32 i32);
 
 macro_rules! check_initialised {
     ($e:expr, $b:block) => {
-        if $e $b else { Err(Error::NoDevice) }
+        if $e $b else { Err(LibBBError::NoConsole) }
     };
 }
 
 fn num_from_arr<T: FromBE, U: AsRef<[u8]>>(data: U) -> T {
     assert!(data.as_ref().len() == size_of::<T>());
-    T::from_be_bytes(*data.as_ref().split_array_ref().0)
+    match data.as_ref() {
+        &[b0, b1, b2, b3] => T::from_be_bytes([b0, b1, b2, b3]),
+        _ => unreachable!(),
+    }
 }
 
 impl BBPlayer {
     pub fn get_players() -> Result<Vec<Device<GlobalContext>>> {
         let devices = DeviceList::new()?;
+        let mut rv = vec![];
 
-        Ok(devices.iter().filter(Self::is_bbp).collect())
+        for device in devices.iter() {
+            if Self::is_bbp(&device)? {
+                rv.push(device);
+            }
+        }
+
+        Ok(rv)
     }
 
     pub fn new(device: &Device<GlobalContext>) -> Result<Self> {
@@ -77,7 +89,7 @@ impl BBPlayer {
         self.set_seqno(0x01)?;
         self.get_num_blocks()?;
         if !self.get_current_fs()? {
-            return Err(Error::Io);
+            return Err(LibBBError::FS);
         }
         self.init_fs()?;
         self.delete_file_and_update("temp.tmp")?;

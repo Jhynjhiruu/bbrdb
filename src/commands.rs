@@ -2,14 +2,15 @@ use std::ffi::CString;
 
 use crate::{
     constants::{BLOCK_CHUNK_SIZE, BLOCK_SIZE, SPARE_SIZE},
+    error::{LibBBError, Result},
     num_from_arr, BBPlayer,
 };
-use rusb::{Error, Result};
 
 use indicatif::ProgressIterator;
 
 #[repr(u32)]
-pub(crate) enum Command {
+#[derive(Debug, Clone, Copy)]
+pub enum Command {
     WriteBlock = 0x06,
     ReadBlock = 0x07,
 
@@ -43,8 +44,8 @@ macro_rules! try_continue {
 }
 
 impl BBPlayer {
-    fn command_error(buf: &[u8]) -> bool {
-        num_from_arr::<i32, _>(&buf[4..8]) < 0
+    fn command_ret(buf: &[u8]) -> i32 {
+        num_from_arr(&buf[4..8])
     }
 
     pub(super) fn read_block_spare(&self, block_num: u32) -> Result<BlockSpare> {
@@ -55,13 +56,14 @@ impl BBPlayer {
             let spare = try_continue!(self.get_spare());
             return Ok((block, spare));
         }
-        Err(Error::Io)
+        Err(LibBBError::ReadBlock(block_num))
     }
 
     fn request_block_read(&self, command: Command, block_num: u32) -> Result<()> {
         self.send_command(command as u32, block_num)?;
-        if Self::command_error(&self.receive_reply(8)?) {
-            Err(Error::Io)
+        let ret = Self::command_ret(&self.receive_reply(8)?);
+        if ret < 0 {
+            Err(LibBBError::Command(command, ret))
         } else {
             Ok(())
         }
@@ -98,7 +100,7 @@ impl BBPlayer {
             try_continue!(self.check_block_write());
             return Ok(());
         }
-        Err(Error::Io)
+        Err(LibBBError::WriteBlock(block_num))
     }
 
     fn request_block_write(&self, command: Command, block_num: u32) -> Result<()> {
@@ -107,8 +109,9 @@ impl BBPlayer {
     }
 
     fn check_block_write(&self) -> Result<()> {
-        if Self::command_error(&self.receive_reply(8)?) {
-            Err(Error::Io)
+        let ret = Self::command_ret(&self.receive_reply(8)?);
+        if ret < 0 {
+            Err(LibBBError::CheckBlockWrite(ret))
         } else {
             Ok(())
         }
@@ -129,8 +132,9 @@ impl BBPlayer {
 
     pub(super) fn init_fs(&self) -> Result<()> {
         self.send_command(Command::InitFS as u32, 0x00)?;
-        if Self::command_error(&self.receive_reply(8)?) {
-            Err(Error::Io)
+        let ret = Self::command_ret(&self.receive_reply(8)?);
+        if ret < 0 {
+            Err(LibBBError::InitFS(ret))
         } else {
             Ok(())
         }
@@ -163,12 +167,12 @@ impl BBPlayer {
         };
 
         if name.len() > 8 || ext.len() > 3 {
-            return Err(Error::Overflow);
+            return Err(LibBBError::FileNameTooLong(filename.to_string()));
         }
 
         let send_buf = match CString::new(filename) {
             Ok(f) => f,
-            Err(_) => return Err(Error::InvalidParam),
+            Err(_) => return Err(LibBBError::FileNameCString(filename.to_string())),
         };
 
         self.send_command(
@@ -207,8 +211,9 @@ impl BBPlayer {
         let first_half = num_from_arr(*timedata.split_array_ref::<4>().0);
         let second_half = &timedata[4..];
         self.send_command(Command::SetTime as u32, first_half)?;
-        if Self::command_error(&self.receive_reply(8)?) {
-            Err(Error::Io)
+        let ret = Self::command_ret(&self.receive_reply(8)?);
+        if ret < 0 {
+            Err(LibBBError::SetTime(ret))
         } else {
             self.send_piecemeal_data(second_half)?;
             Ok(())
@@ -218,8 +223,9 @@ impl BBPlayer {
     pub(super) fn get_bbid(&self) -> Result<u32> {
         self.send_command(Command::GetBBID as u32, 0x00)?;
         let reply = self.receive_reply(8)?;
-        if Self::command_error(&reply) {
-            Err(Error::Io)
+        let ret = Self::command_ret(&reply);
+        if ret < 0 {
+            Err(LibBBError::GetBBID(ret))
         } else {
             Ok(num_from_arr(&reply[4..8]))
         }
