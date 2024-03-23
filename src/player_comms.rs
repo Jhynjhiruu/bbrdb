@@ -1,6 +1,6 @@
 use crate::{
     constants::{PACKET_SIZE, SEND_CHUNK_SIZE, TIMEOUT},
-    error::{LibBBError, Result},
+    error::{LibBBRDBError, Result},
     num_from_arr, BBPlayer,
 };
 
@@ -42,7 +42,7 @@ impl BBPlayer {
     fn is_ready(&self) -> Result<bool> {
         let buf = self.bulk_transfer_receive(4, TIMEOUT)?;
         if buf.len() != 4 {
-            Err(LibBBError::TransferLength(4, buf.len()))
+            Err(LibBBRDBError::TransferLength(4, buf.len()))
         } else {
             Ok(buf == Self::READY_SIGNAL)
         }
@@ -60,14 +60,19 @@ impl BBPlayer {
     fn decode_piecemeal_data(data: &[u8], expected_len: usize) -> Result<Vec<u8>> {
         let mut buf = Vec::with_capacity(expected_len);
         let mut it = data.iter();
-        while buf.len() < expected_len && let Some(&tu) = it.next() {
+        while buf.len() < expected_len
+            && let Some(&tu) = it.next()
+        {
             match tu {
                 0x1D..=0x1F => {
                     for i in TransferCommand::PiecemealChunkRecv as u8..tu {
-                        buf.push(*it.next().ok_or(LibBBError::PiecemealChunkTooShort(tu, i))?);
+                        buf.push(
+                            *it.next()
+                                .ok_or(LibBBRDBError::PiecemealChunkTooShort(tu, i))?,
+                        );
                     }
                 }
-                _ => return Err(LibBBError::UnexpectedPiecemealChunkType(tu)),
+                _ => return Err(LibBBRDBError::UnexpectedPiecemealChunkType(tu)),
             }
         }
         assert!(
@@ -103,8 +108,12 @@ impl BBPlayer {
                 continue;
             }
             if data.len() != 4 || data[0] != 0x1B {
-                return Err(LibBBError::IncorrectDataLengthReply(
-                    if !data.is_empty() { Some(data[0]) } else { None },
+                return Err(LibBBRDBError::IncorrectDataLengthReply(
+                    if !data.is_empty() {
+                        Some(data[0])
+                    } else {
+                        None
+                    },
                     data.len(),
                 ));
             }
@@ -132,12 +141,14 @@ impl BBPlayer {
     pub fn receive_reply(&self, expected_len: usize) -> Result<Vec<u8>> {
         let data_length = self.receive_data_length()?;
         if data_length == 0 || data_length > expected_len {
-            Err(LibBBError::InvalidReplyLength(
-                expected_len,
-                data_length,
-            ))
+            Err(LibBBRDBError::InvalidReplyLength(expected_len, data_length))
         } else {
             self.receive_data(data_length)
         }
+    }
+
+    pub fn receive_unknown_reply(&self) -> Result<Vec<u8>> {
+        let data_length = self.receive_data_length()?;
+        self.receive_data(data_length)
     }
 }

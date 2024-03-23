@@ -7,7 +7,7 @@ use crate::{
         BB_PRODUCT_ID, IQUE_VENDOR_ID, RDB_BULK_EP_IN, RDB_BULK_EP_OUT, RDB_CONF_DESCRIPTOR,
         RDB_INTERFACE,
     },
-    error::{wrap_libusb_error, LibBBError, Result},
+    error::{wrap_libusb_error, LibBBRDBError, Result},
     BBPlayer,
 };
 
@@ -36,7 +36,7 @@ impl BBPlayer {
         handle.set_active_configuration(RDB_CONF_DESCRIPTOR)?;
 
         if !Self::is_correct_descriptor(device)? {
-            return Err(LibBBError::IncorrectDescriptor);
+            return Err(LibBBRDBError::IncorrectDescriptor);
         }
 
         handle.claim_interface(RDB_INTERFACE)?;
@@ -44,7 +44,7 @@ impl BBPlayer {
         handle.clear_halt(RDB_BULK_EP_OUT)?;
 
         if !Self::is_correct_descriptor(device)? {
-            return Err(LibBBError::IncorrectDescriptor);
+            return Err(LibBBRDBError::IncorrectDescriptor);
         }
 
         Ok(handle)

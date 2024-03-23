@@ -1,13 +1,13 @@
-# libbb
-Rust library for interacting with the iQue Player over USB.
+# libbbbrdb
+Rust library for interacting with the iQue Player over USB using the RDB protocol.
 
 ### License
-Copyright © 2023 Jhynjhiruu (https://github.com/Jhynjhiruu)
+Copyright © 2023, 2024 Jhynjhiruu (https://github.com/Jhynjhiruu)
 
-libbb is licensed under the GPL v3 (or any later version).
+libbbrdb is licensed under the GPL v3 (or any later version).
 
 
-libbb based on aulon by Jbop; copyright notice reproduced here:
+libbbrdb based on aulon by Jbop; copyright notice reproduced here:
 
 ```
 aulon © 2018, 2019, 2020 Jbop (https://github.com/jbop1626)

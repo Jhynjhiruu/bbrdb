@@ -5,7 +5,7 @@ use std::{
 
 use crate::{
     constants::{BLOCK_SIZE, SPARE_SIZE},
-    error::{LibBBError, Result},
+    error::{LibBBRDBError, Result},
     num_from_arr, BBPlayer,
 };
 use indicatif::{ProgressBar, ProgressStyle};
@@ -100,7 +100,7 @@ impl FSBlock {
             Ok(_) => {
                 let data = cursor.into_inner();
                 let sum = data[..0x3FFE].as_ref().chunks(2).fold(0u16, |a, e| {
-                    a.wrapping_add(u16::from_be_bytes(*e.split_array_ref().0))
+                    a.wrapping_add(u16::from_be_bytes(e.try_into().unwrap()))
                 });
                 let checksum = 0xCAD7u16.wrapping_sub(sum);
                 cursor = Cursor::new(data);
@@ -127,7 +127,7 @@ impl FileEntry {
         };
 
         if name.len() > 8 || ext.len() > 3 {
-            return Err(LibBBError::FileNameTooLong(filename.to_string()));
+            return Err(LibBBRDBError::FileNameTooLong(filename.to_string()));
         }
 
         self.name
@@ -190,7 +190,7 @@ impl BBPlayer {
             }
             Ok(None)
         } else {
-            Err(LibBBError::NoFSBlock)
+            Err(LibBBRDBError::NoFSBlock)
         }
     }
 
@@ -203,14 +203,14 @@ impl BBPlayer {
             }
             Ok(None)
         } else {
-            Err(LibBBError::NoFSBlock)
+            Err(LibBBRDBError::NoFSBlock)
         }
     }
 
     fn rename_file(&mut self, from: &str, to: &str) -> Result<()> {
         match self.get_file(from)? {
             Some(f) => f.set_filename(to),
-            None => Err(LibBBError::FileNotFound(from.to_string())),
+            None => Err(LibBBRDBError::FileNotFound(from.to_string())),
         }
     }
 
@@ -221,7 +221,7 @@ impl BBPlayer {
     fn get_file_block_count(&self, filename: &str) -> Result<usize> {
         match self.find_file(filename)? {
             Some(f) => Ok(Self::bytes_to_blocks(f.size as usize)),
-            None => Err(LibBBError::FileNotFound(filename.to_string())),
+            None => Err(LibBBRDBError::FileNotFound(filename.to_string())),
         }
     }
 
@@ -235,7 +235,7 @@ impl BBPlayer {
                 }
             }))
         } else {
-            Err(LibBBError::NoFSBlock)
+            Err(LibBBRDBError::NoFSBlock)
         }
     }
 
@@ -247,7 +247,7 @@ impl BBPlayer {
             };
             Ok(block)
         } else {
-            Err(LibBBError::NoFSBlock)
+            Err(LibBBRDBError::NoFSBlock)
         }
     }
 
@@ -271,7 +271,7 @@ impl BBPlayer {
 
             self.init_fs()
         } else {
-            Err(LibBBError::NoFSBlock)
+            Err(LibBBRDBError::NoFSBlock)
         }
     }
 
@@ -313,7 +313,7 @@ impl BBPlayer {
             }
             Ok(Some(rv))
         } else {
-            Err(LibBBError::NoFSBlock)
+            Err(LibBBRDBError::NoFSBlock)
         }
     }
 
@@ -331,7 +331,7 @@ impl BBPlayer {
                 })
                 .collect::<Vec<_>>())
         } else {
-            Err(LibBBError::NoFSBlock)
+            Err(LibBBRDBError::NoFSBlock)
         }
     }
 
@@ -371,7 +371,7 @@ impl BBPlayer {
             });
             Ok((free, used, bad, block.footer.seqno))
         } else {
-            Err(LibBBError::NoFSBlock)
+            Err(LibBBRDBError::NoFSBlock)
         }
     }
 
@@ -385,16 +385,19 @@ impl BBPlayer {
                 )
                 .unwrap(),
             );
-            while filebuf.len() < file.size as usize && let FATEntry::Chain(b) = next_block {
+            while filebuf.len() < file.size as usize
+                && let FATEntry::Chain(b) = next_block
+            {
                 let (read_block, _) = self.read_block_spare(b.into())?;
-                let to_write = &read_block[..read_block.len().min(file.size as usize - filebuf.len())];
+                let to_write =
+                    &read_block[..read_block.len().min(file.size as usize - filebuf.len())];
                 bar.inc(to_write.len() as u64);
                 filebuf.extend(to_write);
                 next_block = block.fat[b as usize];
             }
             Ok(Some(filebuf))
         } else {
-            Err(LibBBError::NoFSBlock)
+            Err(LibBBRDBError::NoFSBlock)
         }
     }
 
@@ -450,7 +453,7 @@ impl BBPlayer {
         let chunks = data.chunks(BLOCK_SIZE);
 
         if blocks_to_write.len() != chunks.len() || blocks_to_write.len() != required_blocks {
-            return Err(LibBBError::IncorrectNumBlocks(
+            return Err(LibBBRDBError::IncorrectNumBlocks(
                 required_blocks,
                 chunks.len(),
                 blocks_to_write.len(),
@@ -481,9 +484,9 @@ impl BBPlayer {
                     return Ok(entry);
                 }
             }
-            Err(LibBBError::NoEmptyFileSlots)
+            Err(LibBBRDBError::NoEmptyFileSlots)
         } else {
-            Err(LibBBError::NoFSBlock)
+            Err(LibBBRDBError::NoFSBlock)
         }
     }
 
@@ -509,9 +512,9 @@ impl BBPlayer {
                     return Ok(index + start_at);
                 }
             }
-            Err(LibBBError::NoFreeBlocks)
+            Err(LibBBRDBError::NoFreeBlocks)
         } else {
-            Err(LibBBError::NoFSBlock)
+            Err(LibBBRDBError::NoFSBlock)
         }
     }
 
@@ -547,7 +550,7 @@ impl BBPlayer {
 
             Ok(free_blocks)
         } else {
-            Err(LibBBError::NoFSBlock)
+            Err(LibBBRDBError::NoFSBlock)
         }
     }
 
@@ -572,7 +575,7 @@ impl BBPlayer {
         if self.file_checksum_cmp("temp.tmp", chksum, (required_blocks * BLOCK_SIZE) as u32)? {
             self.rename_file("temp.tmp", filename)
         } else {
-            Err(LibBBError::ChecksumFailed(filename.to_string(), chksum))
+            Err(LibBBRDBError::ChecksumFailed(filename.to_string(), chksum))
         }
     }
 

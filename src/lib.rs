@@ -4,17 +4,22 @@
 
 use chrono::prelude::*;
 use commands::BlockSpare;
+use num_traits::ToBytes;
+use rdb::RDBPacketType;
 use std::mem::size_of;
 
-use error::{LibBBError, Result};
+use error::{LibBBRDBError, Result};
 use fs::FSBlock;
 use rusb::{Device, DeviceHandle, DeviceList, GlobalContext};
+
+use crate::{commands::Command, constants::TIMEOUT};
 
 pub(crate) mod commands;
 pub(crate) mod constants;
 pub mod error;
 mod fs;
 mod player_comms;
+pub mod rdb;
 mod usb;
 
 #[derive(Debug)]
@@ -84,12 +89,75 @@ impl BBPlayer {
         self.is_initialised
     }
 
+    pub fn mux(&self) -> Result<()> {
+        loop {
+            let (cmd, data) = match self.receive_rdb() {
+                Ok(c) => c,
+                Err(LibBBRDBError::LibUSBError(rusb::Error::Timeout)) => break,
+                x => x?,
+            };
+
+            self.bulk_transfer_send([68], TIMEOUT)?;
+            /*match cmd {
+                RDBPacketType::DevicePrint => todo!(),
+                RDBPacketType::DeviceFault => todo!(),
+                RDBPacketType::DeviceLogCT => todo!(),
+                RDBPacketType::DeviceLog => todo!(),
+                RDBPacketType::DeviceReadyForData => {
+                    println!("ready");
+                }
+                RDBPacketType::DeviceDataCT => todo!(),
+                RDBPacketType::DeviceData => todo!(),
+                RDBPacketType::DeviceDebug => todo!(),
+                RDBPacketType::DeviceRamRom => todo!(),
+                RDBPacketType::DeviceDebugDone => todo!(),
+                RDBPacketType::DeviceDebugReady => todo!(),
+                RDBPacketType::DeviceKDebug => todo!(),
+                RDBPacketType::DeviceProfData => todo!(),
+                RDBPacketType::DeviceDataB => todo!(),
+                RDBPacketType::DeviceSync => todo!(),
+
+                _ => unreachable!(),
+            }*/
+            println!("{cmd:?}, {data:02X?}");
+        }
+
+        //let message = [&[8][..], &(2 as u32).to_be_bytes(), &0u32.to_be_bytes()].concat();
+        //self.send_rdb(RDBPacketType::HostDataB, 1, &message)?;
+
+        self.send_piecemeal_data([0, 0, 0, 2, 0, 0, 0, 0])?;
+
+        //let message = [].concat();
+        //self.bulk_transfer_send(&message,TIMEOUT)?;
+        /*let data = [
+            (16 << 2) | 3,
+            0,
+            0,
+            0,
+            (16 << 2) | 3,
+            2,
+            0,
+            0,
+            (16 << 2) | 2,
+            0,
+            0,
+        ];
+        self.bulk_transfer_send(data, TIMEOUT)?;*/
+
+        //self.send_rdb(RDBPacketType::HostDataDone, 0, &[])?;
+
+        let (cmd, data) = self.receive_rdb()?;
+        println!("{cmd:?}, {data:02X?}");
+
+        Ok(())
+    }
+
     #[allow(non_snake_case)]
     pub fn Init(&mut self) -> Result<()> {
         self.set_seqno(0x01)?;
         self.get_num_blocks()?;
         if !self.get_current_fs()? {
-            return Err(LibBBError::FS);
+            return Err(LibBBRDBError::FS);
         }
         self.init_fs()?;
         self.delete_file_and_update("temp.tmp")?;
@@ -217,5 +285,64 @@ impl Drop for BBPlayer {
             }
             self.is_initialised = false;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{read, write};
+
+    use super::BBPlayer;
+    use super::Result;
+    use chrono::Local;
+
+    #[test]
+    fn it_works() -> Result<()> {
+        let players = BBPlayer::get_players()?;
+        println!("{players:#?}");
+        let mut player = BBPlayer::new(&players[0])?;
+        println!("{player:?}");
+        player.Init()?;
+        println!("{:04X}", player.GetBBID()?);
+        player.SetLED(4)?;
+        player.SetTime(Local::now())?;
+        let blocks = match player.ListFileBlocks("hackit.sys")? {
+            Some(b) => b,
+            None => {
+                eprintln!("File not found");
+                vec![]
+            }
+        };
+        println!("{blocks:X?}");
+        let files = player.ListFiles()?;
+        for file in files {
+            println!("{:>12}: {}", file.0, file.1);
+        }
+        write("current_fs.bin", player.DumpCurrentFS()?).unwrap();
+        /*let (nand, spare) = player.DumpNAND()?;
+        write("nand.bin", nand).unwrap();
+        write("spare.bin", spare).unwrap();*/
+        let (block, spare) = player.ReadSingleBlock(0)?;
+        write("block0.bin", &block).unwrap();
+        write("spare0.bin", &spare).unwrap();
+        player.WriteSingleBlock(block, spare, 0)?;
+        /*let file = match player.ReadFile("00bbc0de.rec")? {
+            Some(b) => b,
+            None => {
+                eprintln!("File not found");
+                vec![]
+            }
+        };
+        write("00bbc0de.rec", file).unwrap();*/
+        let file = read("current_fs.bin").unwrap();
+        player.WriteFile(&file, "test")?;
+        player.WriteFile(&file, "testfile.bin")?;
+        player.DeleteFile("testfile.bin")?;
+        player.DeleteFile("test")?;
+
+        let (free, used, bad, seqno) = player.GetStats()?;
+        println!("Free: {free} (0x{free:04X})\nUsed: {used} (0x{used:04X})\nBad: {bad} (0x{bad:04X})\nSequence Number: {seqno}");
+
+        Ok(())
     }
 }

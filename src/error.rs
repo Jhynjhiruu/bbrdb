@@ -5,7 +5,7 @@ use crate::commands::Command;
 use crate::player_comms::TransferCommand;
 
 #[derive(Error, Debug)]
-pub enum LibBBError {
+pub enum LibBBRDBError {
     #[error("libusb error: {0}")]
     LibUSBError(#[from] rusb::Error),
 
@@ -82,9 +82,12 @@ pub enum LibBBError {
 
     #[error("Failed to verify file {0} (expected checksum {1:08X}")]
     ChecksumFailed(String, u32),
+
+    #[error("Invalid RDB command {0}")]
+    InvalidRDBCommand(u8),
 }
 
-pub type Result<T> = std::result::Result<T, LibBBError>;
+pub type Result<T> = std::result::Result<T, LibBBRDBError>;
 
 pub(crate) fn wrap_libusb_error<T>(value: rusb::Result<T>) -> Result<T> {
     match value {

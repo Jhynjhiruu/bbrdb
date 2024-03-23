@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-pub(crate) const IQUE_VENDOR_ID: u16 = 0x1527;
+//pub(crate) const IQUE_VENDOR_ID: u16 = 0x1527;
+//pub(crate) const BB_PRODUCT_ID: u16 = 0xBBDB;
+
+pub(crate) const IQUE_VENDOR_ID: u16 = 0xBB3D;
 pub(crate) const BB_PRODUCT_ID: u16 = 0xBBDB;
 
 pub(crate) const RDB_CONF_DESCRIPTOR: u8 = 1;
