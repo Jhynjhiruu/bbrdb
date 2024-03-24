@@ -1,4 +1,4 @@
-# libbbbrdb
+# libbbrdb
 Rust library for interacting with the iQue Player over USB using the RDB protocol.
 
 ### License
