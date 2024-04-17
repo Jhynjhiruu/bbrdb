@@ -11,14 +11,17 @@ use indicatif::ProgressIterator;
 #[repr(u32)]
 #[derive(Debug, Clone, Copy)]
 pub enum Command {
+    #[cfg(feature = "writing")]
     WriteBlock = 0x06,
     ReadBlock = 0x07,
 
+    #[cfg(feature = "writing")]
     WriteBlockAndSpare = 0x10,
     ReadBlockAndSpare = 0x11,
     InitFS = 0x12,
 
     GetNumBlocks = 0x15,
+    #[cfg(feature = "writing")]
     SetSeqNo = 0x16,
     GetSeqNo = 0x17,
 
@@ -27,6 +30,9 @@ pub enum Command {
     SetTime = 0x1E,
     GetBBID = 0x1F,
     SignHash = 0x20,
+
+    #[cfg(feature = "patched")]
+    DumpV2 = 0x21,
 }
 
 pub type BlockSpare = (Vec<u8>, Vec<u8>);
@@ -87,6 +93,7 @@ impl BBPlayer {
         self.receive_reply(SPARE_SIZE)
     }
 
+    #[cfg(feature = "writing")]
     pub(super) fn write_block_spare(
         &self,
         block: &[u8],
@@ -109,11 +116,13 @@ impl BBPlayer {
         Err(LibBBRDBError::WriteBlock(block_num))
     }
 
+    #[cfg(feature = "writing")]
     fn request_block_write(&self, command: Command, block_num: u32) -> Result<()> {
         self.send_command(command as u32, block_num)?;
         self.wait_ready()
     }
 
+    #[cfg(feature = "writing")]
     fn check_block_write(&self) -> Result<()> {
         let ret = Self::command_ret(&self.receive_reply(8)?);
         if ret < 0 {
@@ -123,10 +132,12 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(feature = "writing")]
     fn send_block(&self, data: &[u8]) -> Result<()> {
         self.send_chunked_data(data)
     }
 
+    #[cfg(feature = "writing")]
     fn send_spare(&self, data: &[u8]) -> Result<()> {
         self.wait_ready()?;
         let data = [&data[..3], &[0xFF; SPARE_SIZE - 3]].concat();
@@ -153,6 +164,7 @@ impl BBPlayer {
         Ok(size)
     }
 
+    #[cfg(feature = "writing")]
     pub(super) fn set_seqno(&self, arg: u32) -> Result<()> {
         self.send_command(Command::SetSeqNo as u32, arg)?;
         self.receive_reply(8)?;
@@ -253,6 +265,7 @@ impl BBPlayer {
         self.read_block_spare(block_num)
     }
 
+    #[cfg(feature = "writing")]
     pub(super) fn write_single_block(
         &self,
         block: &[u8],
@@ -260,5 +273,19 @@ impl BBPlayer {
         block_num: u32,
     ) -> Result<()> {
         self.write_block_spare(block, spare, block_num)
+    }
+
+    #[cfg(feature = "patched")]
+    pub(super) fn dump_v2(&mut self) -> Result<()> {
+        use std::fs::write;
+
+        self.send_command(Command::DumpV2 as u32, 0x00)?;
+        let ret = Self::command_ret(&self.receive_reply(8)?);
+        if ret < 0 {
+            return Err(LibBBRDBError::Command(Command::DumpV2, ret));
+        }
+        let buf = self.receive_reply(0x100)?;
+        write("v2.bin", buf).unwrap();
+        Ok(())
     }
 }

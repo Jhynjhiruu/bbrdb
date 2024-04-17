@@ -1,5 +1,5 @@
-use bb::error::{LibBBRDBError, Result};
-use bb::BBPlayer;
+use bbrdb::error::{LibBBRDBError, Result};
+use bbrdb::BBPlayer;
 
 fn main() -> Result<()> {
     let players = BBPlayer::get_players()?;

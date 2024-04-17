@@ -257,6 +257,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(feature = "writing")]
     fn update_fs(&mut self) -> Result<()> {
         let next_index = (self.current_fs_index.wrapping_sub(1) % 16) + 0xFF0;
 
@@ -357,6 +358,7 @@ impl BBPlayer {
         Ok(())
     }
 
+    #[cfg(feature = "writing")]
     pub(super) fn delete_file_and_update(&mut self, filename: &str) -> Result<()> {
         self.delete_file(filename)?;
         self.update_fs()
@@ -437,6 +439,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(feature = "writing")]
     fn write_file_blocks(
         &self,
         data: &[u8],
@@ -554,6 +557,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(feature = "writing")]
     fn write_blocks_to_temp_file(&mut self, data: &[u8], required_blocks: usize) -> Result<()> {
         let start_block = self.find_next_free_block(0x40)?;
         self.write_file_entry(
@@ -579,6 +583,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(feature = "writing")]
     pub(super) fn write_file(&mut self, data: &[u8], filename: &str) -> Result<()> {
         let chksum = Self::calculate_file_checksum(data);
         let required_blocks = Self::bytes_to_blocks(data.len());

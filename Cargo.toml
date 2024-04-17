@@ -15,3 +15,8 @@ num-traits = "0.2.15"
 #rusb = { path = "D:/GitHub/rusb" }
 rusb = "0.9.1"
 thiserror = "1.0.40"
+
+[features]
+patched = []
+raw_rdb = []
+writing = []

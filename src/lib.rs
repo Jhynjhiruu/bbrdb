@@ -49,7 +49,7 @@ from_be!(u32 i32);
 
 macro_rules! check_initialised {
     ($e:expr, $b:block) => {
-        if $e $b else { Err(LibBBError::NoConsole) }
+        if $e $b else { Err(LibBBRDBError::NoConsole) }
     };
 }
 
@@ -154,12 +154,14 @@ impl BBPlayer {
 
     #[allow(non_snake_case)]
     pub fn Init(&mut self) -> Result<()> {
+        #[cfg(feature = "writing")]
         self.set_seqno(0x01)?;
         self.get_num_blocks()?;
         if !self.get_current_fs()? {
             return Err(LibBBRDBError::FS);
         }
         self.init_fs()?;
+        #[cfg(feature = "writing")]
         self.delete_file_and_update("temp.tmp")?;
         self.is_initialised = true;
         Ok(())
@@ -225,6 +227,7 @@ impl BBPlayer {
     // WriteNAND
 
     #[allow(non_snake_case)]
+    #[cfg(feature = "writing")]
     pub fn WriteSingleBlock<T: AsRef<[u8]>, U: AsRef<[u8]>>(
         &self,
         block: T,
@@ -242,6 +245,7 @@ impl BBPlayer {
     }
 
     #[allow(non_snake_case)]
+    #[cfg(feature = "writing")]
     pub fn WriteFile<T: AsRef<[u8]>, U: AsRef<str>>(&mut self, data: T, filename: U) -> Result<()> {
         check_initialised!(self.is_initialised, {
             self.write_file(data.as_ref(), filename.as_ref())
@@ -249,6 +253,7 @@ impl BBPlayer {
     }
 
     #[allow(non_snake_case)]
+    #[cfg(feature = "writing")]
     pub fn DeleteFile<T: AsRef<str>>(&mut self, filename: T) -> Result<()> {
         check_initialised!(self.is_initialised, {
             self.delete_file_and_update(filename.as_ref())
@@ -270,6 +275,12 @@ impl BBPlayer {
             self.is_initialised = false;
             Ok(())
         })
+    }
+
+    #[allow(non_snake_case)]
+    #[cfg(feature = "patched")]
+    pub fn DumpV2(&mut self) -> Result<()> {
+        check_initialised!(self.is_initialised, { self.dump_v2() })
     }
 }
 
@@ -323,22 +334,26 @@ mod tests {
         write("nand.bin", nand).unwrap();
         write("spare.bin", spare).unwrap();*/
         let (block, spare) = player.ReadSingleBlock(0)?;
-        write("block0.bin", &block).unwrap();
-        write("spare0.bin", &spare).unwrap();
-        player.WriteSingleBlock(block, spare, 0)?;
-        /*let file = match player.ReadFile("00bbc0de.rec")? {
-            Some(b) => b,
-            None => {
-                eprintln!("File not found");
-                vec![]
-            }
-        };
-        write("00bbc0de.rec", file).unwrap();*/
-        let file = read("current_fs.bin").unwrap();
-        player.WriteFile(&file, "test")?;
-        player.WriteFile(&file, "testfile.bin")?;
-        player.DeleteFile("testfile.bin")?;
-        player.DeleteFile("test")?;
+
+        #[cfg(feature = "writing")]
+        {
+            write("block0.bin", &block).unwrap();
+            write("spare0.bin", &spare).unwrap();
+            player.WriteSingleBlock(block, spare, 0)?;
+            /*let file = match player.ReadFile("00bbc0de.rec")? {
+                Some(b) => b,
+                None => {
+                    eprintln!("File not found");
+                    vec![]
+                }
+            };
+            write("00bbc0de.rec", file).unwrap();*/
+            let file = read("current_fs.bin").unwrap();
+            player.WriteFile(&file, "test")?;
+            player.WriteFile(&file, "testfile.bin")?;
+            player.DeleteFile("testfile.bin")?;
+            player.DeleteFile("test")?;
+        }
 
         let (free, used, bad, seqno) = player.GetStats()?;
         println!("Free: {free} (0x{free:04X})\nUsed: {used} (0x{used:04X})\nBad: {bad} (0x{bad:04X})\nSequence Number: {seqno}");
