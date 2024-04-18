@@ -1,4 +1,4 @@
-use std::ffi::CString;
+use std::{ffi::CString, iter::repeat};
 
 use crate::{
     constants::{BLOCK_CHUNK_SIZE, BLOCK_SIZE, SPARE_SIZE},
@@ -257,9 +257,20 @@ impl BBPlayer {
         let mut nand = Vec::with_capacity(num_blocks as usize * BLOCK_SIZE);
         let mut spare = Vec::with_capacity(num_blocks as usize * SPARE_SIZE);
         for block_num in (0..num_blocks).progress() {
-            let (dumped_block, dumped_spare) = self.read_block_spare(block_num)?;
-            nand.extend(dumped_block);
-            spare.extend(dumped_spare);
+            let read = self.read_block_spare(block_num);
+            if let Err(e) = read {
+                eprintln!("Error reading block {block_num}: {e}");
+                nand.extend(
+                    repeat(0xBAAD)
+                        .flat_map(|e: u16| e.to_be_bytes())
+                        .take(BLOCK_SIZE),
+                );
+                spare.extend(repeat(0x00).take(SPARE_SIZE));
+            } else {
+                let (dumped_block, dumped_spare) = read.unwrap();
+                nand.extend(dumped_block);
+                spare.extend(dumped_spare);
+            }
         }
         Ok((nand, spare))
     }
