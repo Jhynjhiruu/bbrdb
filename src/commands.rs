@@ -15,6 +15,8 @@ pub enum Command {
     WriteBlock = 0x06,
     ReadBlock = 0x07,
 
+    ScanBlocks = 0x0D,
+
     #[cfg(feature = "writing")]
     WriteBlockAndSpare = 0x10,
     ReadBlockAndSpare = 0x11,
@@ -252,19 +254,23 @@ impl BBPlayer {
         }
     }
 
+    fn scan_blocks(&self) -> Result<Vec<bool>> {
+        let num_blocks = self.get_num_blocks()?;
+        self.send_command(Command::ScanBlocks as u32, 0x00)?;
+        let reply = self.receive_reply(num_blocks as usize)?;
+        Ok(reply.iter().map(|e| e != &0).collect())
+    }
+
     pub(super) fn dump_nand_and_spare(&self) -> Result<BlockSpare> {
         let num_blocks = self.get_num_blocks()?;
         let mut nand = Vec::with_capacity(num_blocks as usize * BLOCK_SIZE);
         let mut spare = Vec::with_capacity(num_blocks as usize * SPARE_SIZE);
-        for block_num in (0..num_blocks).progress() {
-            let read = self.read_block_spare(block_num);
-            if let Err(e) = read {
-                if let LibBBRDBError::LibUSBError(e) = e {
-                    eprintln!("{e}");
-                    return Ok((nand, spare));
-                }
 
-                eprintln!("Error reading block {block_num}: {e}");
+        let bad_blocks = self.scan_blocks()?;
+
+        for block_num in (0..num_blocks).progress() {
+            if bad_blocks[block_num as usize] {
+                eprintln!("Marked bad block: {block_num}");
                 nand.extend(
                     repeat(0xBAAD)
                         .flat_map(|e: u16| e.to_be_bytes())
@@ -272,9 +278,25 @@ impl BBPlayer {
                 );
                 spare.extend(repeat(0x00).take(SPARE_SIZE));
             } else {
-                let (dumped_block, dumped_spare) = read.unwrap();
-                nand.extend(dumped_block);
-                spare.extend(dumped_spare);
+                let read = self.read_block_spare(block_num);
+                if let Err(e) = read {
+                    if let LibBBRDBError::LibUSBError(e) = e {
+                        eprintln!("{e}");
+                        return Ok((nand, spare));
+                    }
+
+                    eprintln!("Error reading block {block_num}: {e}");
+                    nand.extend(
+                        repeat(0xBAAD)
+                            .flat_map(|e: u16| e.to_be_bytes())
+                            .take(BLOCK_SIZE),
+                    );
+                    spare.extend(repeat(0x00).take(SPARE_SIZE));
+                } else {
+                    let (dumped_block, dumped_spare) = read.unwrap();
+                    nand.extend(dumped_block);
+                    spare.extend(dumped_spare);
+                }
             }
         }
         Ok((nand, spare))
