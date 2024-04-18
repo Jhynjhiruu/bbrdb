@@ -268,6 +268,7 @@ impl BBPlayer {
         let mut spare = Vec::with_capacity(num_blocks as usize * SPARE_SIZE);
 
         let bad_blocks = self.scan_blocks()?;
+        println!("{bad_blocks:?}");
 
         for block_num in (0..num_blocks).progress() {
             if bad_blocks[block_num as usize] {
