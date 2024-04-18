@@ -20,7 +20,7 @@ pub(crate) const BLOCK_SIZE: usize = 0x4000;
 pub(crate) const BLOCK_CHUNK_SIZE: usize = 0x1000;
 pub(crate) const SPARE_SIZE: usize = 0x10;
 
-pub(crate) const TIMEOUT: Duration = Duration::SECOND;
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(20);
 
 pub(crate) const PACKET_SIZE: usize = 0x80;
 

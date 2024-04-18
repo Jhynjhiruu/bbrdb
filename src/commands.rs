@@ -255,9 +255,10 @@ impl BBPlayer {
     }
 
     fn scan_blocks(&self) -> Result<Vec<bool>> {
-        let num_blocks = self.get_num_blocks()?;
         self.send_command(Command::ScanBlocks as u32, 0x00)?;
-        let reply = self.receive_reply(num_blocks as usize)?;
+        println!("Waiting for the console to check the blocks...");
+        let length = Self::command_ret(&self.receive_reply(8)?);
+        let reply = self.receive_reply(length as usize)?;
         Ok(reply.iter().map(|e| e != &0).collect())
     }
 
