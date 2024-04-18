@@ -264,21 +264,25 @@ impl BBPlayer {
 
     pub(super) fn dump_nand_and_spare(&self) -> Result<BlockSpare> {
         let num_blocks = self.get_num_blocks()?;
-        let mut nand = Vec::with_capacity(num_blocks as usize * BLOCK_SIZE);
-        let mut spare = Vec::with_capacity(num_blocks as usize * SPARE_SIZE);
+        let mut nand = vec![0; num_blocks as usize * BLOCK_SIZE];
+        let mut spare = vec![0; num_blocks as usize * SPARE_SIZE];
 
-        let bad_blocks = self.scan_blocks()?;
-        println!("{bad_blocks:?}");
+        //let bad_blocks = self.scan_blocks()?;
+        //println!("{bad_blocks:?}");
 
-        for block_num in (0..num_blocks).progress() {
-            if bad_blocks[block_num as usize] {
+        for block_num in (0..num_blocks).progress().rev() {
+            if false {
+                //bad_blocks[block_num as usize] {
                 eprintln!("Marked bad block: {block_num}");
-                nand.extend(
-                    repeat(0xBAAD)
-                        .flat_map(|e: u16| e.to_be_bytes())
-                        .take(BLOCK_SIZE),
-                );
-                spare.extend(repeat(0x00).take(SPARE_SIZE));
+                nand[block_num as usize * BLOCK_SIZE..(block_num + 1) as usize * BLOCK_SIZE]
+                    .copy_from_slice(
+                        &repeat(0xBAAD)
+                            .flat_map(|e: u16| e.to_be_bytes())
+                            .take(BLOCK_SIZE)
+                            .collect::<Vec<_>>(),
+                    );
+                spare[block_num as usize * SPARE_SIZE..(block_num + 1) as usize * SPARE_SIZE]
+                    .copy_from_slice(&repeat(0x00).take(SPARE_SIZE).collect::<Vec<_>>());
             } else {
                 let read = self.read_block_spare(block_num);
                 if let Err(e) = read {
@@ -288,16 +292,22 @@ impl BBPlayer {
                     }
 
                     eprintln!("Error reading block {block_num}: {e}");
-                    nand.extend(
-                        repeat(0xBAAD)
-                            .flat_map(|e: u16| e.to_be_bytes())
-                            .take(BLOCK_SIZE),
-                    );
-                    spare.extend(repeat(0x00).take(SPARE_SIZE));
+                    nand[block_num as usize * BLOCK_SIZE..(block_num + 1) as usize * BLOCK_SIZE]
+                        .copy_from_slice(
+                            &repeat(0xBAAD)
+                                .flat_map(|e: u16| e.to_be_bytes())
+                                .take(BLOCK_SIZE)
+                                .collect::<Vec<_>>(),
+                        );
+                    spare[block_num as usize * SPARE_SIZE..(block_num + 1) as usize * SPARE_SIZE]
+                        .copy_from_slice(&repeat(0x00).take(SPARE_SIZE).collect::<Vec<_>>());
                 } else {
                     let (dumped_block, dumped_spare) = read.unwrap();
-                    nand.extend(dumped_block);
-                    spare.extend(dumped_spare);
+
+                    nand[block_num as usize * BLOCK_SIZE..(block_num + 1) as usize * BLOCK_SIZE]
+                        .copy_from_slice(&dumped_block);
+                    spare[block_num as usize * SPARE_SIZE..(block_num + 1) as usize * SPARE_SIZE]
+                        .copy_from_slice(&dumped_spare);
                 }
             }
         }
