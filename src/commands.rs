@@ -147,6 +147,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(not(feature = "raw_access"))]
     pub(super) fn init_fs(&self) -> Result<()> {
         self.send_command(Command::InitFS as u32, 0x00)?;
         let ret = Self::command_ret(&self.receive_reply(8)?);
@@ -171,11 +172,13 @@ impl BBPlayer {
         Ok(())
     }
 
+    #[cfg(not(feature = "raw_access"))]
     pub(super) fn file_checksum_cmp(&self, filename: &str, chksum: u32, size: u32) -> Result<bool> {
         self.send_filename(filename)?;
         self.send_params_and_receive_reply(chksum, size)
     }
 
+    #[cfg(not(feature = "raw_access"))]
     fn send_filename(&self, filename: &str) -> Result<()> {
         let split = filename.split('.').collect::<Vec<_>>();
         let (name, ext) = if split.len() > 1 {

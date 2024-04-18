@@ -257,7 +257,7 @@ impl BBPlayer {
         }
     }
 
-    #[cfg(feature = "writing")]
+    #[cfg(all(feature = "writing", not(feature = "raw_access")))]
     fn update_fs(&mut self) -> Result<()> {
         let next_index = (self.current_fs_index.wrapping_sub(1) % 16) + 0xFF0;
 
@@ -276,6 +276,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(not(feature = "raw_access"))]
     fn check_seqno(&mut self, block_num: u32, current_seqno: u32) -> Result<u32> {
         let (block, spare) = self.read_block_spare(block_num)?;
         let seqno = num_from_arr(&block[0x3FF8..0x3FFC]);
@@ -292,6 +293,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(not(feature = "raw_access"))]
     pub(super) fn get_current_fs(&mut self) -> Result<bool> {
         let mut current_seqno: u32 = 0;
         for i in (0xFF0..=0xFFF).rev() {
@@ -300,6 +302,7 @@ impl BBPlayer {
         Ok(current_seqno != 0)
     }
 
+    #[cfg(not(feature = "raw_access"))]
     pub(super) fn list_file_blocks(&self, filename: &str) -> Result<Option<Vec<u16>>> {
         if let Some(block) = &self.current_fs_block {
             let file = match self.find_file(filename)? {
@@ -318,6 +321,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(not(feature = "raw_access"))]
     pub(super) fn list_files(&self) -> Result<Vec<(String, u32)>> {
         if let Some(block) = &self.current_fs_block {
             Ok(block
@@ -336,6 +340,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(not(feature = "raw_access"))]
     fn free_blocks(&mut self, mut next_block: FATEntry) {
         if let Some(block) = &mut self.current_fs_block {
             while let FATEntry::Chain(b) = next_block {
@@ -346,6 +351,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(not(feature = "raw_access"))]
     pub(crate) fn delete_file(&mut self, filename: &str) -> Result<()> {
         let file = match self.get_file(filename)? {
             Some(f) => f,
@@ -358,12 +364,13 @@ impl BBPlayer {
         Ok(())
     }
 
-    #[cfg(feature = "writing")]
+    #[cfg(all(feature = "writing", not(feature = "raw_access")))]
     pub(super) fn delete_file_and_update(&mut self, filename: &str) -> Result<()> {
         self.delete_file(filename)?;
         self.update_fs()
     }
 
+    #[cfg(not(feature = "raw_access"))]
     pub(super) fn get_stats(&self) -> Result<(usize, usize, usize, u32)> {
         if let Some(block) = &self.current_fs_block {
             let (free, used, bad) = block.fat.iter().fold((0, 0, 0), |(a, b, c), e| match e {
@@ -403,6 +410,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(not(feature = "raw_access"))]
     pub(super) fn read_file(&self, filename: &str) -> Result<Option<Vec<u8>>> {
         let file = match self.find_file(filename)? {
             Some(f) => f,
@@ -415,6 +423,7 @@ impl BBPlayer {
         data.iter().fold(0u32, |a, &e| a.wrapping_add(e as u32))
     }
 
+    #[cfg(not(feature = "raw_access"))]
     fn validate_file_write(
         &mut self,
         filename: &str,
@@ -480,6 +489,7 @@ impl BBPlayer {
         Ok(())
     }
 
+    #[cfg(not(feature = "raw_access"))]
     fn find_blank_file_entry(&mut self) -> Result<&mut FileEntry> {
         if let Some(block) = &mut self.current_fs_block {
             for entry in &mut block.entries {
@@ -493,6 +503,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(not(feature = "raw_access"))]
     fn write_file_entry(
         &mut self,
         filename: &str,
@@ -508,6 +519,7 @@ impl BBPlayer {
         Ok(())
     }
 
+    #[cfg(not(feature = "raw_access"))]
     fn find_next_free_block(&self, start_at: usize) -> Result<usize> {
         if let Some(block) = &self.current_fs_block {
             for (index, i) in block.fat[start_at..].iter().enumerate() {
@@ -521,6 +533,7 @@ impl BBPlayer {
         }
     }
 
+    #[cfg(not(feature = "raw_access"))]
     fn update_fs_links(&mut self, start_block: usize, required_blocks: usize) -> Result<Vec<u16>> {
         let mut free_blocks = Vec::with_capacity(required_blocks);
         free_blocks.push(start_block as u16);
@@ -557,7 +570,7 @@ impl BBPlayer {
         }
     }
 
-    #[cfg(feature = "writing")]
+    #[cfg(all(feature = "writing", not(feature = "raw_access")))]
     fn write_blocks_to_temp_file(&mut self, data: &[u8], required_blocks: usize) -> Result<()> {
         let start_block = self.find_next_free_block(0x40)?;
         self.write_file_entry(
@@ -570,6 +583,7 @@ impl BBPlayer {
         self.write_file_blocks(data, &blocks_to_write, required_blocks)
     }
 
+    #[cfg(not(feature = "raw_access"))]
     fn check_and_cleanup_temp_file(
         &mut self,
         filename: &str,
@@ -583,7 +597,7 @@ impl BBPlayer {
         }
     }
 
-    #[cfg(feature = "writing")]
+    #[cfg(all(feature = "writing", not(feature = "raw_access")))]
     pub(super) fn write_file(&mut self, data: &[u8], filename: &str) -> Result<()> {
         let chksum = Self::calculate_file_checksum(data);
         let required_blocks = Self::bytes_to_blocks(data.len());

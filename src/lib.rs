@@ -157,11 +157,13 @@ impl BBPlayer {
         #[cfg(feature = "writing")]
         self.set_seqno(0x01)?;
         self.get_num_blocks()?;
+        #[cfg(not(feature = "raw_access"))]
         if !self.get_current_fs()? {
             return Err(LibBBRDBError::FS);
         }
+        #[cfg(not(feature = "raw_access"))]
         self.init_fs()?;
-        #[cfg(feature = "writing")]
+        #[cfg(all(feature = "writing", not(feature = "raw_access")))]
         self.delete_file_and_update("temp.tmp")?;
         self.is_initialised = true;
         Ok(())
@@ -198,6 +200,7 @@ impl BBPlayer {
     }
 
     #[allow(non_snake_case)]
+    #[cfg(not(feature = "raw_access"))]
     pub fn ListFileBlocks<T: AsRef<str>>(&self, filename: T) -> Result<Option<Vec<u16>>> {
         check_initialised!(self.is_initialised, {
             self.list_file_blocks(filename.as_ref())
@@ -205,11 +208,13 @@ impl BBPlayer {
     }
 
     #[allow(non_snake_case)]
+    #[cfg(not(feature = "raw_access"))]
     pub fn ListFiles(&self) -> Result<Vec<(String, u32)>> {
         check_initialised!(self.is_initialised, { self.list_files() })
     }
 
     #[allow(non_snake_case)]
+    #[cfg(not(feature = "raw_access"))]
     pub fn DumpCurrentFS(&self) -> Result<Vec<u8>> {
         check_initialised!(self.is_initialised, { self.dump_current_fs() })
     }
@@ -240,12 +245,13 @@ impl BBPlayer {
     }
 
     #[allow(non_snake_case)]
+    #[cfg(not(feature = "raw_access"))]
     pub fn ReadFile<T: AsRef<str>>(&self, filename: T) -> Result<Option<Vec<u8>>> {
         check_initialised!(self.is_initialised, { self.read_file(filename.as_ref()) })
     }
 
     #[allow(non_snake_case)]
-    #[cfg(feature = "writing")]
+    #[cfg(all(feature = "writing", not(feature = "raw_access")))]
     pub fn WriteFile<T: AsRef<[u8]>, U: AsRef<str>>(&mut self, data: T, filename: U) -> Result<()> {
         check_initialised!(self.is_initialised, {
             self.write_file(data.as_ref(), filename.as_ref())
@@ -253,7 +259,7 @@ impl BBPlayer {
     }
 
     #[allow(non_snake_case)]
-    #[cfg(feature = "writing")]
+    #[cfg(all(feature = "writing", not(feature = "raw_access")))]
     pub fn DeleteFile<T: AsRef<str>>(&mut self, filename: T) -> Result<()> {
         check_initialised!(self.is_initialised, {
             self.delete_file_and_update(filename.as_ref())
@@ -261,6 +267,7 @@ impl BBPlayer {
     }
 
     #[allow(non_snake_case)]
+    #[cfg(not(feature = "raw_access"))]
     pub fn GetStats(&self) -> Result<(usize, usize, usize, u32)> {
         check_initialised!(self.is_initialised, { self.get_stats() })
     }
@@ -317,25 +324,28 @@ mod tests {
         println!("{:04X}", player.GetBBID()?);
         player.SetLED(4)?;
         player.SetTime(Local::now())?;
-        let blocks = match player.ListFileBlocks("hackit.sys")? {
-            Some(b) => b,
-            None => {
-                eprintln!("File not found");
-                vec![]
+        #[cfg(not(feature = "raw_access"))]
+        {
+            let blocks = match player.ListFileBlocks("hackit.sys")? {
+                Some(b) => b,
+                None => {
+                    eprintln!("File not found");
+                    vec![]
+                }
+            };
+            println!("{blocks:X?}");
+            let files = player.ListFiles()?;
+            for file in files {
+                println!("{:>12}: {}", file.0, file.1);
             }
-        };
-        println!("{blocks:X?}");
-        let files = player.ListFiles()?;
-        for file in files {
-            println!("{:>12}: {}", file.0, file.1);
+            write("current_fs.bin", player.DumpCurrentFS()?).unwrap();
         }
-        write("current_fs.bin", player.DumpCurrentFS()?).unwrap();
         /*let (nand, spare) = player.DumpNAND()?;
         write("nand.bin", nand).unwrap();
         write("spare.bin", spare).unwrap();*/
         let (block, spare) = player.ReadSingleBlock(0)?;
 
-        #[cfg(feature = "writing")]
+        #[cfg(all(feature = "writing", not(feature = "raw_access")))]
         {
             write("block0.bin", &block).unwrap();
             write("spare0.bin", &spare).unwrap();
@@ -355,8 +365,11 @@ mod tests {
             player.DeleteFile("test")?;
         }
 
-        let (free, used, bad, seqno) = player.GetStats()?;
-        println!("Free: {free} (0x{free:04X})\nUsed: {used} (0x{used:04X})\nBad: {bad} (0x{bad:04X})\nSequence Number: {seqno}");
+        #[cfg(not(feature = "raw_access"))]
+        {
+            let (free, used, bad, seqno) = player.GetStats()?;
+            println!("Free: {free} (0x{free:04X})\nUsed: {used} (0x{used:04X})\nBad: {bad} (0x{bad:04X})\nSequence Number: {seqno}");
+        }
 
         Ok(())
     }
