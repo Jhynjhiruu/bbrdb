@@ -10,7 +10,7 @@ use crate::{
 };
 use indicatif::{ProgressBar, ProgressStyle};
 
-use binrw::{binrw, BinReaderExt, BinResult, BinWriterExt};
+use binrw::{binrw, BinRead, BinResult, BinWriterExt};
 
 #[binrw]
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -183,7 +183,7 @@ impl FileEntry {
 impl BBPlayer {
     fn get_file(&mut self, filename: &str) -> Result<Option<&mut FileEntry>> {
         if let Some(block) = &mut self.current_fs_block {
-            for file in &mut block.entries {
+            for file in &mut block[0].entries {
                 if file.valid() && file.get_fullname() == filename {
                     return Ok(Some(file));
                 }
@@ -196,7 +196,7 @@ impl BBPlayer {
 
     fn find_file(&self, filename: &str) -> Result<Option<&FileEntry>> {
         if let Some(block) = &self.current_fs_block {
-            for file in &block.entries {
+            for file in &block[0].entries {
                 if file.valid() && file.get_fullname() == filename {
                     return Ok(Some(file));
                 }
@@ -227,33 +227,43 @@ impl BBPlayer {
 
     fn get_free_block_count(&self) -> Result<usize> {
         if let Some(block) = &self.current_fs_block {
-            Ok(block.fat.iter().fold(0, |a, e| {
-                if matches!(e, FATEntry::Free) {
-                    a + 1
-                } else {
-                    a
-                }
-            }))
+            Ok(block
+                .iter()
+                .map(|b| {
+                    b.fat.iter().fold(0, |a, e| {
+                        if matches!(e, FATEntry::Free) {
+                            a + 1
+                        } else {
+                            a
+                        }
+                    })
+                })
+                .sum())
         } else {
             Err(LibBBRDBError::NoFSBlock)
         }
     }
 
     pub(super) fn dump_current_fs(&self) -> Result<Vec<u8>> {
+        let mut rv = vec![];
         if let Some(b) = &self.current_fs_block {
-            let block = match b.write() {
-                Ok(bl) => bl,
-                Err(e) => return Err(e.into()),
-            };
-            Ok(block)
+            for block in b {
+                match block.write() {
+                    Ok(bl) => rv.extend(bl),
+                    Err(e) => return Err(e.into()),
+                };
+            }
         } else {
-            Err(LibBBRDBError::NoFSBlock)
+            return Err(LibBBRDBError::NoFSBlock);
         }
+        Ok(rv)
     }
 
     fn increment_seqno(&mut self) {
         if let Some(block) = &mut self.current_fs_block {
-            block.footer.seqno = block.footer.seqno.wrapping_add(1);
+            for b in block {
+                b.footer.seqno = b.footer.seqno.wrapping_add(1);
+            }
         }
     }
 
@@ -281,10 +291,27 @@ impl BBPlayer {
         let (block, spare) = self.read_block_spare(block_num)?;
         let seqno = num_from_arr(&block[0x3FF8..0x3FFC]);
         if seqno > current_seqno {
-            self.current_fs_block = match FSBlock::read(&block) {
-                Ok(b) => Some(b),
-                Err(e) => return Err(e.into()),
-            };
+            let root = FSBlock::read(&block)?;
+
+            let mut fs_vec = vec![];
+
+            let link_block = root.footer.link_block;
+
+            fs_vec.push(root);
+
+            if link_block != 0 {
+                let (link_block, link_spare) = self.read_block_spare(link_block as u32)?;
+                let link_seqno: u32 = num_from_arr(&link_block[0x3FF8..0x3FFC]);
+                if link_seqno != seqno {
+                    return Err(LibBBRDBError::InvalidLink);
+                }
+
+                let link = FSBlock::read(&link_block)?;
+                fs_vec.push(link);
+            }
+
+            self.current_fs_block = Some(fs_vec);
+
             self.current_fs_spare = spare;
             self.current_fs_index = block_num - 0xFF0;
             Ok(seqno)
@@ -295,8 +322,9 @@ impl BBPlayer {
 
     #[cfg(not(feature = "raw_access"))]
     pub(super) fn get_current_fs(&mut self) -> Result<bool> {
+        let num_blocks = self.get_num_blocks()?;
         let mut current_seqno: u32 = 0;
-        for i in (0xFF0..=0xFFF).rev() {
+        for i in (num_blocks - 0x10..num_blocks).rev() {
             current_seqno = self.check_seqno(i, current_seqno)?;
         }
         Ok(current_seqno != 0)
@@ -313,7 +341,7 @@ impl BBPlayer {
             let mut next_block = file.start;
             while let FATEntry::Chain(b) = next_block {
                 rv.push(b);
-                next_block = block.fat[b as usize];
+                next_block = block[(b >> 12) as usize].fat[(b & 0x0FFF) as usize];
             }
             Ok(Some(rv))
         } else {
@@ -324,7 +352,7 @@ impl BBPlayer {
     #[cfg(not(feature = "raw_access"))]
     pub(super) fn list_files(&self) -> Result<Vec<(String, u32)>> {
         if let Some(block) = &self.current_fs_block {
-            Ok(block
+            Ok(block[0]
                 .entries
                 .iter()
                 .filter_map(|e| {
@@ -345,8 +373,8 @@ impl BBPlayer {
         if let Some(block) = &mut self.current_fs_block {
             while let FATEntry::Chain(b) = next_block {
                 let b = b as usize;
-                next_block = block.fat[b];
-                block.fat[b] = FATEntry::Free;
+                next_block = block[b >> 12].fat[b & 0x0FFF];
+                block[b >> 12].fat[b & 0x0FFF] = FATEntry::Free;
             }
         }
     }
@@ -373,12 +401,14 @@ impl BBPlayer {
     #[cfg(not(feature = "raw_access"))]
     pub(super) fn get_stats(&self) -> Result<(usize, usize, usize, u32)> {
         if let Some(block) = &self.current_fs_block {
-            let (free, used, bad) = block.fat.iter().fold((0, 0, 0), |(a, b, c), e| match e {
-                FATEntry::Free => (a + 1, b, c),
-                FATEntry::BadBlock => (a, b, c + 1),
-                _ => (a, b + 1, c),
+            let (free, used, bad) = block.iter().fold((0, 0, 0), |i, bl| {
+                bl.fat.iter().fold(i, |(a, b, c), e| match e {
+                    FATEntry::Free => (a + 1, b, c),
+                    FATEntry::BadBlock => (a, b, c + 1),
+                    _ => (a, b + 1, c),
+                })
             });
-            Ok((free, used, bad, block.footer.seqno))
+            Ok((free, used, bad, block[0].footer.seqno))
         } else {
             Err(LibBBRDBError::NoFSBlock)
         }
@@ -402,7 +432,7 @@ impl BBPlayer {
                     &read_block[..read_block.len().min(file.size as usize - filebuf.len())];
                 bar.inc(to_write.len() as u64);
                 filebuf.extend(to_write);
-                next_block = block.fat[b as usize];
+                next_block = block[(b >> 12) as usize].fat[(b & 0x0FFF) as usize];
             }
             Ok(Some(filebuf))
         } else {
@@ -492,7 +522,7 @@ impl BBPlayer {
     #[cfg(not(feature = "raw_access"))]
     fn find_blank_file_entry(&mut self) -> Result<&mut FileEntry> {
         if let Some(block) = &mut self.current_fs_block {
-            for entry in &mut block.entries {
+            for entry in &mut block[0].entries {
                 if !entry.valid() {
                     return Ok(entry);
                 }
@@ -522,9 +552,11 @@ impl BBPlayer {
     #[cfg(not(feature = "raw_access"))]
     fn find_next_free_block(&self, start_at: usize) -> Result<usize> {
         if let Some(block) = &self.current_fs_block {
-            for (index, i) in block.fat[start_at..].iter().enumerate() {
-                if matches!(i, FATEntry::Free) {
-                    return Ok(index + start_at);
+            for bl in &block[start_at >> 12..] {
+                for (index, i) in bl.fat[start_at & 0x0FFF..].iter().enumerate() {
+                    if matches!(i, FATEntry::Free) {
+                        return Ok(index + start_at);
+                    }
                 }
             }
             Err(LibBBRDBError::NoFreeBlocks)
@@ -558,11 +590,13 @@ impl BBPlayer {
         if let Some(block) = &mut self.current_fs_block {
             let mut current_block = free_blocks[0];
             for &next_block in &free_blocks[1..free_blocks.len()] {
-                block.fat[current_block as usize] = FATEntry::Chain(next_block);
+                block[(current_block >> 12) as usize].fat[(current_block & 0x0FFF) as usize] =
+                    FATEntry::Chain(next_block);
 
                 current_block = next_block;
             }
-            block.fat[current_block as usize] = FATEntry::EndOfChain;
+            block[(current_block >> 12) as usize].fat[(current_block & 0x0FFF) as usize] =
+                FATEntry::EndOfChain;
 
             Ok(free_blocks)
         } else {

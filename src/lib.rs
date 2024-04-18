@@ -26,7 +26,7 @@ mod usb;
 pub struct BBPlayer {
     handle: DeviceHandle<GlobalContext>,
     current_fs_index: u32,
-    current_fs_block: Option<FSBlock>,
+    current_fs_block: Option<Vec<FSBlock>>,
     current_fs_spare: Vec<u8>,
     is_initialised: bool,
 }

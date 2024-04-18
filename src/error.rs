@@ -68,6 +68,9 @@ pub enum LibBBRDBError {
     #[error("No FS block found. Did the console initialise properly?")]
     NoFSBlock,
 
+    #[error("The link block does not match the current FS block")]
+    InvalidLink,
+
     #[error("File {0} not found on the console")]
     FileNotFound(String),
 
