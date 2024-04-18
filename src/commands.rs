@@ -259,6 +259,11 @@ impl BBPlayer {
         for block_num in (0..num_blocks).progress() {
             let read = self.read_block_spare(block_num);
             if let Err(e) = read {
+                if let LibBBRDBError::LibUSBError(e) = e {
+                    eprintln!("{e}");
+                    return Ok((nand, spare));
+                }
+
                 eprintln!("Error reading block {block_num}: {e}");
                 nand.extend(
                     repeat(0xBAAD)
