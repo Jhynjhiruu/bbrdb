@@ -47,7 +47,7 @@ pub struct FileEntry {
 }
 
 #[binrw]
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum FSType {
     #[brw(magic = b"BBFS")]
     Bbfs,
@@ -290,8 +290,12 @@ impl BBPlayer {
     fn check_seqno(&mut self, block_num: u32, current_seqno: u32) -> Result<u32> {
         let (block, spare) = self.read_block_spare(block_num)?;
         let seqno = num_from_arr(&block[0x3FF8..0x3FFC]);
-        if seqno > current_seqno {
+        if seqno >= current_seqno {
             let root = FSBlock::read(&block)?;
+
+            if root.footer.fs_type == FSType::Bbfl {
+                return Ok(current_seqno);
+            }
 
             let mut fs_vec = vec![];
 
