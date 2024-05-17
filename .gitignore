@@ -1,5 +1,7 @@
 /target
-*.rec
+*.tmp
+*.ini
 *.bin
-*.sys
-*.txt
+*.db
+*.bak
+*.new

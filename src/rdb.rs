@@ -1,8 +1,16 @@
-use crate::{constants::TIMEOUT, error::LibBBRDBError, num_from_arr, BBPlayer, Result};
+use std::collections::VecDeque;
+use std::mem::size_of;
+
+use rusb::UsbContext;
+
+use crate::constants::{RDB_BLOCKS_PER_CHUNK, RDB_BLOCK_SIZE, TIMEOUT};
+use crate::error::*;
+use crate::Handle;
+use crate::LibBBRDBError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum RDBPacketType {
+pub enum RDBCommand {
     DevicePrint = 1,
     DeviceFault,
     DeviceLogCT,
@@ -33,7 +41,7 @@ pub enum RDBPacketType {
     HostDebugDone,
 }
 
-impl TryFrom<u8> for RDBPacketType {
+impl TryFrom<u8> for RDBCommand {
     type Error = u8;
 
     fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
@@ -72,38 +80,180 @@ impl TryFrom<u8> for RDBPacketType {
     }
 }
 
-impl BBPlayer {
-    pub fn receive_rdb(&self) -> Result<(RDBPacketType, Vec<u8>)> {
-        let data = self.bulk_transfer_receive(4, TIMEOUT)?;
-        if data.len() != 4 {
-            return Err(LibBBRDBError::IncorrectDataLengthReply(
-                if !data.is_empty() {
-                    Some(data[0])
-                } else {
-                    None
-                },
-                data.len(),
+fn encode_rdb_hdr(cmd: RDBCommand, len: usize) -> u8 {
+    ((cmd as u8) << 2) | (len as u8)
+}
+
+fn encode_rdb_packet(cmd: RDBCommand, data: &[u8]) -> Vec<u8> {
+    let len = data.len();
+    assert!(len < 4);
+
+    let mut rv = vec![];
+
+    rv.push(encode_rdb_hdr(cmd, len));
+    rv.extend(data);
+
+    rv
+}
+
+fn encode_rdb_block_packet(cmd: RDBCommand, data: &[u8]) -> Vec<u8> {
+    let len = data.len();
+    assert!(len <= RDB_BLOCK_SIZE);
+
+    let mut rv = vec![];
+
+    rv.push(encode_rdb_hdr(cmd, 3));
+    rv.push(len as u8);
+    rv.extend(data);
+
+    rv
+}
+
+fn decode_rdb_cmd_len(byte: u8) -> Result<(RDBCommand, u8)> {
+    let cmd = (byte >> 2).try_into();
+    cmd.map(|c| (c, byte & 0b11))
+        .map_err(LibBBRDBError::RDBUnknown)
+}
+
+fn to_u32(data: &[u8]) -> u32 {
+    let mut v = vec![0; size_of::<u32>()];
+    v.extend(data);
+    u32::from_be_bytes(v[v.len() - 4..].try_into().unwrap())
+}
+
+impl<C: UsbContext> Handle<C> {
+    fn send_rdb_block_data(&self, data: &[u8]) -> Result<()> {
+        let cmd = RDBCommand::HostDataB;
+
+        //println!("block send: {data:02X?}");
+
+        for chunk in data.chunks(RDB_BLOCK_SIZE * RDB_BLOCKS_PER_CHUNK) {
+            let mut buf = Vec::with_capacity(RDB_BLOCK_SIZE * RDB_BLOCKS_PER_CHUNK);
+            for block in chunk.chunks(RDB_BLOCK_SIZE) {
+                buf.extend(encode_rdb_block_packet(cmd, block));
+            }
+
+            if self.bulk_transfer_send(&buf, TIMEOUT)? != buf.len() {
+                return Err(LibBBRDBError::WrongDataLength);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn send_rdb_data(&self, cmd: RDBCommand, data: &[u8]) -> Result<()> {
+        //println!("send: {data:02X?}");
+
+        for chunk in data.chunks(RDB_BLOCKS_PER_CHUNK) {
+            let mut buf = Vec::with_capacity((chunk.len() * 4) / 3);
+            for block in chunk.chunks(3) {
+                buf.extend(encode_rdb_packet(cmd, block));
+            }
+
+            if self.bulk_transfer_send(&buf, TIMEOUT)? != buf.len() {
+                return Err(LibBBRDBError::WrongDataLength);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn write_data<T: AsRef<[u8]>>(&self, cmd: RDBCommand, data: T) -> Result<()> {
+        self.check_player_ready()?;
+
+        let data = data.as_ref();
+
+        if data.len() > 16 && cmd == RDBCommand::HostData {
+            self.send_rdb_block_data(data)
+        } else {
+            self.send_rdb_data(cmd, data)
+        }
+    }
+
+    pub(crate) fn read_rdb_packet(&self) -> Result<(RDBCommand, Vec<u8>)> {
+        let data = self.bulk_transfer_receive(1, TIMEOUT)?[0];
+        //println!("rdb packet: {:02X} {}", data >> 2, data & 3);
+        let (cmd, len) = decode_rdb_cmd_len(data)?;
+        if cmd == RDBCommand::DeviceDataB {
+            let len = self.bulk_transfer_receive(1, TIMEOUT)?[0];
+
+            Ok((cmd, self.bulk_transfer_receive(len as usize, TIMEOUT)?))
+        } else {
+            let mut data = self.bulk_transfer_receive(3, TIMEOUT)?;
+
+            data.truncate(len as usize);
+
+            Ok((cmd, data))
+        }
+    }
+
+    pub(crate) fn read_rdb_bulk(&self, len: usize) -> Result<Vec<u8>> {
+        let amount_to_read = ((len + 2) / 3) * 4;
+
+        let data = self.bulk_transfer_receive(amount_to_read, TIMEOUT)?;
+
+        let mut rv = vec![];
+
+        for chunk in data.chunks(4) {
+            let (cmd, len) = decode_rdb_cmd_len(chunk[0])?;
+            assert_eq!(cmd, RDBCommand::DeviceData);
+
+            rv.extend(&chunk[1..len as usize + 1]);
+        }
+
+        Ok(rv)
+    }
+
+    pub(crate) fn check_player_ready(&self) -> Result<bool> {
+        self.read_rdb_packet()
+            .map(|d| d.0 == RDBCommand::DeviceReadyForData)
+    }
+
+    fn send_ack(&self) -> Result<()> {
+        self.bulk_transfer_send(&encode_rdb_packet(RDBCommand::HostDataDone, &[]), TIMEOUT)?;
+        Ok(())
+    }
+
+    pub(crate) fn read_chunk(&self) -> Result<Vec<u8>> {
+        let mut rv = vec![];
+
+        let (cmd, data) = self.read_rdb_packet()?;
+        if cmd != RDBCommand::DeviceDataCT {
+            return Err(LibBBRDBError::RDBUnexpected(
+                cmd,
+                vec![RDBCommand::DeviceDataCT],
             ));
         }
 
-        let cmd = match ((data[0] >> 2) & 0x3F).try_into() {
-            Ok(c) => c,
-            Err(e) => return Err(LibBBRDBError::InvalidRDBCommand(e)),
-        };
+        let count = to_u32(&data);
+        //println!("count: {count:08X}");
 
-        let len = data[0] & 3;
+        /*while rv.len() < count as usize {
+            let (cmd, data) = self.read_rdb_packet()?;
+            //println!("{cmd:?}");
+            match cmd {
+                RDBCommand::DeviceData => rv.extend(data),
 
-        let data = data[1..len as usize + 1].to_vec();
+                x => return Err(LibBBRDBError::RDBUnhandled(x)),
+            }
+        }*/
 
-        Ok((cmd, data))
+        rv = self.read_rdb_bulk(count as usize)?;
+
+        self.send_ack()?;
+
+        //println!("recv {rv:02X?}");
+
+        Ok(rv)
     }
 
-    pub fn send_rdb(&self, cmd: RDBPacketType, len: u8, data: &[u8]) -> Result<usize> {
-        assert!(len < 4);
-        let cmd = cmd as u8;
-        let packet = (cmd << 2) | len;
+    pub(crate) fn read_data(&self, len: usize) -> Result<Vec<u8>> {
+        let mut rv = vec![];
 
-        let message = [&[packet], data].concat();
-        self.bulk_transfer_send(message, TIMEOUT)
+        while rv.len() < len {
+            rv.extend(self.read_chunk()?);
+        }
+
+        Ok(rv)
     }
 }

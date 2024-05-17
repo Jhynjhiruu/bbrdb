@@ -1,16 +1,147 @@
-use std::{
-    ffi::CString,
-    io::{Cursor, Seek},
-};
+use std::ffi::CString;
+use std::io::Cursor;
+use std::iter::repeat;
+use std::num::Wrapping;
 
-use crate::{
-    constants::{BLOCK_SIZE, SPARE_SIZE},
-    error::{LibBBRDBError, Result},
-    num_from_arr, BBPlayer,
-};
-use indicatif::{ProgressBar, ProgressStyle};
+use binrw::binrw;
+use binrw::BinRead;
+use binrw::BinResult;
+use binrw::BinWrite;
+use indicatif::ProgressBar;
+use indicatif::ProgressStyle;
+use rusb::UsbContext;
 
-use binrw::{binrw, BinRead, BinResult, BinWriterExt};
+use crate::commands::Command;
+use crate::constants::BLOCK_SIZE;
+use crate::constants::NUM_FATS;
+use crate::constants::SPARE_SIZE;
+use crate::error::*;
+use crate::rdb::RDBCommand;
+use crate::require_fat;
+use crate::require_init;
+use crate::Handle;
+
+fn next_block_size(size: u32) -> u32 {
+    (size + (BLOCK_SIZE - 1) as u32) & !((BLOCK_SIZE - 1) as u32)
+}
+
+#[derive(Debug)]
+pub struct Fat {
+    entries: Vec<FATEntry>,
+    files: Vec<FileEntry>,
+    seqno: u32,
+    blkno: u32,
+}
+
+#[derive(Debug)]
+struct _Fat {
+    entries: Vec<FATEntry>,
+    files: Vec<FileEntry>,
+    seqno: Option<u32>,
+    blkno: Option<u32>,
+}
+
+impl From<_Fat> for Fat {
+    fn from(value: _Fat) -> Self {
+        Self {
+            entries: value.entries,
+            files: value.files,
+            seqno: value.seqno.unwrap(),
+            blkno: value.blkno.unwrap(),
+        }
+    }
+}
+
+impl Fat {
+    pub fn check(&self) -> Result<()> {
+        for file in &self.files {
+            if file.valid != FileValid::Valid {
+                continue;
+            }
+
+            let mut b = &file.start;
+            while b != &FATEntry::EndOfChain {
+                match b {
+                    FATEntry::Chain(n) => b = &self.entries[*n as usize],
+                    FATEntry::Free | FATEntry::BadBlock | FATEntry::Reserved => {
+                        println!("Found invalid file");
+                    }
+                    FATEntry::EndOfChain => unreachable!(),
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn blocks(&self) -> Vec<FSBlock> {
+        let blocks = self.entries.chunks(0x1000);
+
+        blocks
+            .into_iter()
+            .enumerate()
+            .map(|(index, b)| FSBlock {
+                fat: b.try_into().unwrap(),
+                entries: if index == 0 {
+                    self.files
+                        .iter()
+                        .cloned()
+                        .chain(repeat(FileEntry::default()))
+                        .take(409)
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap()
+                } else {
+                    repeat(FileEntry::default())
+                        .take(409)
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap()
+                },
+                footer: FSFooter {
+                    fs_type: if index == 0 {
+                        FSType::Bbfs
+                    } else {
+                        FSType::Bbfl
+                    },
+                    seqno: self.seqno.wrapping_add(1),
+                    link_block: 0,
+                    chksum: 0,
+                },
+            })
+            .collect()
+    }
+}
+
+impl _Fat {
+    pub fn new() -> Self {
+        Self {
+            entries: vec![],
+            files: vec![],
+            seqno: None,
+            blkno: None,
+        }
+    }
+
+    pub fn add_block(&mut self, block: FSBlock, num: u32) -> u16 {
+        let link = block.footer.link_block;
+
+        self.entries.extend(block.fat);
+        if self.files.is_empty() {
+            self.files.extend(block.entries);
+        }
+        match self.seqno {
+            Some(n) => assert_eq!(n, block.footer.seqno),
+            None => self.seqno = Some(block.footer.seqno),
+        }
+        match self.blkno {
+            Some(n) => assert_eq!(n, num),
+            None => self.blkno = Some(num),
+        }
+
+        link
+    }
+}
 
 #[binrw]
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -27,7 +158,7 @@ pub enum FATEntry {
 }
 
 #[binrw]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum FileValid {
     #[brw(magic = 0x00u8)]
     Invalid,
@@ -36,14 +167,83 @@ pub enum FileValid {
 }
 
 #[binrw]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FileEntry {
     name: [u8; 8],
     ext: [u8; 3],
     valid: FileValid,
-    #[brw(pad_after(2))]
     start: FATEntry,
+    pad: u16, // used by libdragon for non-block file sizes
     size: u32,
+}
+
+impl Default for FileEntry {
+    fn default() -> Self {
+        Self {
+            name: Default::default(),
+            ext: Default::default(),
+            valid: FileValid::Invalid,
+            start: FATEntry::Free,
+            pad: 0,
+            size: 0,
+        }
+    }
+}
+
+impl FileEntry {
+    pub(crate) fn format_name(&self) -> String {
+        let name = self.name.split(|b| b == &0).next().unwrap();
+        let name = String::from_utf8_lossy(name);
+
+        let ext = self.ext.split(|b| b == &0).next().unwrap();
+        let ext = String::from_utf8_lossy(ext);
+
+        if ext == "" {
+            name.into_owned()
+        } else {
+            format!("{}.{}", name, ext)
+        }
+    }
+
+    pub(crate) fn valid(&self) -> bool {
+        self.valid == FileValid::Valid
+    }
+
+    pub(crate) fn set_name(&mut self, filename: &str) -> Result<()> {
+        let split = filename.split('.').collect::<Vec<_>>();
+        let (name, ext) = if split.len() > 1 {
+            (split[0], split[1])
+        } else {
+            (split[0], "")
+        };
+
+        if name.len() > 8 || ext.len() > 3 {
+            return Err(LibBBRDBError::FileNameTooLong(filename.to_string()));
+        }
+
+        self.name
+            .copy_from_slice((name.to_owned() + &"\0".repeat(8 - name.len())).as_bytes());
+        self.ext
+            .copy_from_slice((ext.to_owned() + &"\0".repeat(3 - ext.len())).as_bytes());
+
+        Ok(())
+    }
+
+    pub(crate) fn set_size(&mut self, filesize: u32) {
+        let padded = next_block_size(filesize);
+        let diff = padded - filesize;
+
+        self.size = padded;
+        self.pad = diff as u16;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Default::default();
+    }
+
+    pub(crate) fn size(&self) -> usize {
+        self.size as usize - self.pad as usize
+    }
 }
 
 #[binrw]
@@ -72,145 +272,131 @@ pub(crate) struct FSBlock {
     footer: FSFooter,
 }
 
-impl FSBlock {
-    fn read<T: AsRef<[u8]>>(data: T) -> BinResult<Self> {
-        let mut cursor = Cursor::new(data.as_ref());
-        match <_>::read_be(&mut cursor) {
-            Ok(fs) => {
-                if data.as_ref().chunks(2).fold(0u16, |a, e| match e {
-                    &[upper, lower] => a.wrapping_add(u16::from_be_bytes([upper, lower])),
-                    _ => unreachable!(),
-                }) != 0xCAD7
-                {
-                    Err(binrw::Error::AssertFail {
-                        pos: 0x3FFE,
-                        message: "Invalid checksum".to_string(),
-                    })
-                } else {
-                    Ok(fs)
-                }
-            }
-            Err(e) => Err(e),
-        }
-    }
+const FAT_CHECKSUM: u16 = 0xCAD7;
 
-    fn write(&self) -> BinResult<Vec<u8>> {
-        let mut cursor = Cursor::new(vec![]);
-        match cursor.write_be(self) {
-            Ok(_) => {
-                let data = cursor.into_inner();
-                let sum = data[..0x3FFE].as_ref().chunks(2).fold(0u16, |a, e| {
-                    a.wrapping_add(u16::from_be_bytes(e.try_into().unwrap()))
-                });
-                let checksum = 0xCAD7u16.wrapping_sub(sum);
-                cursor = Cursor::new(data);
-                cursor.seek(std::io::SeekFrom::End(-2)).unwrap();
-                cursor.write_be(&checksum).unwrap();
-                Ok(cursor.into_inner())
-            }
-            Err(e) => Err(e),
-        }
-    }
-}
-
-impl FileEntry {
-    fn valid(&self) -> bool {
-        self.name[0] != 0 && self.valid == FileValid::Valid && self.start != FATEntry::EndOfChain
-    }
-
-    fn set_filename(&mut self, filename: &str) -> Result<()> {
-        let split = filename.split('.').collect::<Vec<_>>();
-        let (name, ext) = if split.len() > 1 {
-            (split[0], split[1])
-        } else {
-            (split[0], "")
-        };
-
-        if name.len() > 8 || ext.len() > 3 {
-            return Err(LibBBRDBError::FileNameTooLong(filename.to_string()));
-        }
-
-        self.name
-            .copy_from_slice((name.to_owned() + &"\0".repeat(8 - name.len())).as_bytes());
-        self.ext
-            .copy_from_slice((ext.to_owned() + &"\0".repeat(3 - ext.len())).as_bytes());
-
+fn check_fat_checksum(data: &[u8]) -> Result<()> {
+    let sum: Wrapping<u16> = data
+        .chunks(2)
+        .map(|c| Wrapping(u16::from_be_bytes(c.try_into().unwrap())))
+        .sum();
+    if sum.0 != FAT_CHECKSUM {
+        Err(LibBBRDBError::InvalidFATChecksum(sum.0))
+    } else {
         Ok(())
     }
-
-    fn get_filename(&self) -> String {
-        match self.name.iter().enumerate().find(|(_, &e)| e == 0) {
-            Some((index, _)) => CString::new(&self.name[..index]),
-            None => CString::new(self.name),
-        }
-        .expect("Already checked for unexpected nulls")
-        .to_string_lossy()
-        .into_owned()
-    }
-
-    fn get_fileext(&self) -> String {
-        match self.ext.iter().enumerate().find(|(_, &e)| e == 0) {
-            Some((index, _)) => CString::new(&self.ext[..index]),
-            None => CString::new(self.ext),
-        }
-        .expect("Already checked for unexpected nulls")
-        .to_string_lossy()
-        .into_owned()
-    }
-
-    fn get_fullname(&self) -> String {
-        format!(
-            "{}{}{}",
-            self.get_filename(),
-            if self.get_filename() != "" && self.get_fileext() != "" {
-                "."
-            } else {
-                ""
-            },
-            self.get_fileext()
-        )
-    }
-
-    fn clear(&mut self) {
-        self.name = [0; 8];
-        self.ext = [0; 3];
-        self.valid = FileValid::Invalid;
-        self.start = FATEntry::Free;
-        self.size = 0;
-    }
 }
 
-impl BBPlayer {
+fn fix_fat_checksum(data: &mut [u8]) {
+    let sum: Wrapping<u16> = data[..0x3FFE]
+        .as_ref()
+        .chunks(2)
+        .map(|c| Wrapping(u16::from_be_bytes(c.try_into().unwrap())))
+        .sum();
+    let checksum = FAT_CHECKSUM.wrapping_sub(sum.0);
+    data[0x3FFE..].copy_from_slice(&checksum.to_be_bytes());
+}
+
+pub struct CardStats {
+    pub free: usize,
+    pub used: usize,
+    pub bad: usize,
+    pub seqno: u32,
+}
+
+impl<C: UsbContext> Handle<C> {
+    fn write_fat_block(&mut self, block: u32, fs: FSBlock) -> Result<()> {
+        let mut data = vec![];
+        let mut cursor = Cursor::new(&mut data);
+        fs.write_be(&mut cursor)?;
+
+        fix_fat_checksum(&mut data);
+
+        self.write_blocks(block, &[&data])
+    }
+
+    fn read_fat_block(&self, block: u32) -> Result<FSBlock> {
+        let (nand, _) = self.read_blocks_spare(block, 1)?;
+
+        check_fat_checksum(&nand)?;
+
+        let mut cursor = Cursor::new(&nand);
+        Ok(FSBlock::read_be(&mut cursor)?)
+    }
+
+    fn find_best_fat(&self, cardsize: u32) -> Result<Fat> {
+        let mut fat = _Fat::new();
+
+        if cardsize == 0 {
+            return Err(LibBBRDBError::UnhandledCardSize);
+        }
+
+        let mut best_seqno = 0;
+        let mut best_fat = None;
+
+        for f in 0..NUM_FATS {
+            let fat = self.read_fat_block(cardsize - f - 1);
+            if let Ok(b) = fat {
+                if b.footer.fs_type == FSType::Bbfs && b.footer.seqno >= best_seqno {
+                    best_seqno = b.footer.seqno;
+                    best_fat = Some(f);
+                }
+            }
+        }
+
+        if let Some(f) = best_fat {
+            let mut link = cardsize - f - 1;
+
+            while link != 0 {
+                let b = self.read_fat_block(link)?;
+
+                link = fat.add_block(b, f) as u32;
+            }
+
+            Ok(fat.into())
+        } else {
+            Err(LibBBRDBError::NoFAT)
+        }
+    }
+
+    pub(crate) fn read_fat(&self, cardsize: u32) -> Result<Fat> {
+        let fat = self.find_best_fat(cardsize)?;
+
+        fat.check()?;
+
+        Ok(fat)
+    }
+
     fn get_file(&mut self, filename: &str) -> Result<Option<&mut FileEntry>> {
-        if let Some(block) = &mut self.current_fs_block {
-            for file in &mut block[0].entries {
-                if file.valid() && file.get_fullname() == filename {
+        require_fat!(mut self, _p, fat {
+            for file in &mut fat.files {
+                if file.valid() && file.format_name() == filename {
                     return Ok(Some(file));
                 }
             }
             Ok(None)
-        } else {
-            Err(LibBBRDBError::NoFSBlock)
-        }
+        })
     }
 
     fn find_file(&self, filename: &str) -> Result<Option<&FileEntry>> {
-        if let Some(block) = &self.current_fs_block {
-            for file in &block[0].entries {
-                if file.valid() && file.get_fullname() == filename {
+        require_fat!(self, _p, fat {
+            for file in &fat.files {
+                if file.valid() && file.format_name() == filename {
                     return Ok(Some(file));
                 }
             }
             Ok(None)
-        } else {
-            Err(LibBBRDBError::NoFSBlock)
-        }
+        })
     }
 
     fn rename_file(&mut self, from: &str, to: &str) -> Result<()> {
-        match self.get_file(from)? {
-            Some(f) => f.set_filename(to),
-            None => Err(LibBBRDBError::FileNotFound(from.to_string())),
+        if from == to {
+            Ok(())
+        } else {
+            self.delete_file(to)?;
+            match self.get_file(from)? {
+                Some(f) => f.set_name(to),
+                None => Err(LibBBRDBError::FileNotFound(from.to_string())),
+            }
         }
     }
 
@@ -226,399 +412,264 @@ impl BBPlayer {
     }
 
     fn get_free_block_count(&self) -> Result<usize> {
-        if let Some(block) = &self.current_fs_block {
-            Ok(block
-                .iter()
-                .map(|b| {
-                    b.fat.iter().fold(0, |a, e| {
-                        if matches!(e, FATEntry::Free) {
-                            a + 1
-                        } else {
-                            a
-                        }
-                    })
-                })
-                .sum())
-        } else {
-            Err(LibBBRDBError::NoFSBlock)
-        }
-    }
-
-    pub(super) fn dump_current_fs(&self) -> Result<Vec<u8>> {
-        let mut rv = vec![];
-        if let Some(b) = &self.current_fs_block {
-            for block in b {
-                match block.write() {
-                    Ok(bl) => rv.extend(bl),
-                    Err(e) => return Err(e.into()),
-                };
-            }
-        } else {
-            return Err(LibBBRDBError::NoFSBlock);
-        }
-        Ok(rv)
-    }
-
-    fn increment_seqno(&mut self) {
-        if let Some(block) = &mut self.current_fs_block {
-            for b in block {
-                b.footer.seqno = b.footer.seqno.wrapping_add(1);
-            }
-        }
-    }
-
-    #[cfg(all(feature = "writing", not(feature = "raw_access")))]
-    fn update_fs(&mut self) -> Result<()> {
-        let next_index = (self.current_fs_index.wrapping_sub(1) % 16) + 0xFF0;
-
-        self.increment_seqno();
-
-        if let Some(b) = &self.current_fs_block {
-            let block = match b.write() {
-                Ok(bl) => bl,
-                Err(e) => return Err(e.into()),
-            };
-            self.write_block_spare(&block, &self.current_fs_spare, next_index)?;
-
-            self.init_fs()
-        } else {
-            Err(LibBBRDBError::NoFSBlock)
-        }
-    }
-
-    #[cfg(not(feature = "raw_access"))]
-    fn check_seqno(&mut self, block_num: u32, current_seqno: u32) -> Result<u32> {
-        let (block, spare) = self.read_block_spare(block_num)?;
-        let seqno = num_from_arr(&block[0x3FF8..0x3FFC]);
-        if seqno >= current_seqno {
-            let root = FSBlock::read(&block)?;
-
-            if root.footer.fs_type == FSType::Bbfl {
-                return Ok(current_seqno);
-            }
-
-            let mut fs_vec = vec![];
-
-            let link_block = root.footer.link_block;
-
-            fs_vec.push(root);
-
-            if link_block != 0 {
-                let (link_block, link_spare) = self.read_block_spare(link_block as u32)?;
-                let link_seqno: u32 = num_from_arr(&link_block[0x3FF8..0x3FFC]);
-                if link_seqno != seqno {
-                    return Err(LibBBRDBError::InvalidLink);
+        require_fat!(self, _p, fat {
+            Ok(fat.entries.iter().fold(0, |a, e| {
+                if matches!(e, FATEntry::Free) {
+                    a + 1
+                } else {
+                    a
                 }
-
-                let link = FSBlock::read(&link_block)?;
-                fs_vec.push(link);
-            }
-
-            self.current_fs_block = Some(fs_vec);
-
-            self.current_fs_spare = spare;
-            self.current_fs_index = block_num - 0xFF0;
-            Ok(seqno)
-        } else {
-            Ok(current_seqno)
-        }
+            }))
+        })
     }
 
-    #[cfg(not(feature = "raw_access"))]
-    pub(super) fn get_current_fs(&mut self) -> Result<bool> {
-        let num_blocks = self.get_num_blocks()?;
-        let mut current_seqno: u32 = 0;
-        for i in (num_blocks - 0x10..num_blocks).rev() {
-            current_seqno = self.check_seqno(i, current_seqno)?;
-        }
-        Ok(current_seqno != 0)
-    }
-
-    #[cfg(not(feature = "raw_access"))]
-    pub(super) fn list_file_blocks(&self, filename: &str) -> Result<Option<Vec<u16>>> {
-        if let Some(block) = &self.current_fs_block {
-            let file = match self.find_file(filename)? {
-                Some(f) => f,
-                None => return Ok(None),
+    #[cfg(feature = "writing")]
+    fn update_fs(&mut self) -> Result<()> {
+        require_fat!(self, player, fat {
+            let mut next_index = fat.blkno;
+            let mut next_block = || {
+                next_index = next_index.wrapping_add(1) % 16;
+                player.cardsize - next_index - 1
             };
-            let mut rv = vec![];
-            let mut next_block = file.start;
-            while let FATEntry::Chain(b) = next_block {
-                rv.push(b);
-                next_block = block[(b >> 12) as usize].fat[(b & 0x0FFF) as usize];
+
+            let mut blocks = fat.blocks();
+
+            let mut addrs = vec![];
+            for _ in 0..blocks.len() {
+                addrs.push(next_block());
             }
-            Ok(Some(rv))
-        } else {
-            Err(LibBBRDBError::NoFSBlock)
-        }
+
+            for (index, block) in blocks.iter_mut().enumerate() {
+                block.footer.link_block = addrs.get(index + 1).copied().unwrap_or(0) as _;
+            }
+
+            for (block, &addr) in blocks.into_iter().zip(&addrs) {
+                self.write_fat_block(addr, block)?;
+            }
+
+            Ok(())
+        })
     }
 
-    #[cfg(not(feature = "raw_access"))]
-    pub(super) fn list_files(&self) -> Result<Vec<(String, u32)>> {
-        if let Some(block) = &self.current_fs_block {
-            Ok(block[0]
-                .entries
-                .iter()
-                .filter_map(|e| {
-                    if e.valid() {
-                        Some((e.get_fullname(), e.size))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>())
-        } else {
-            Err(LibBBRDBError::NoFSBlock)
-        }
-    }
-
-    #[cfg(not(feature = "raw_access"))]
-    fn free_blocks(&mut self, mut next_block: FATEntry) {
-        if let Some(block) = &mut self.current_fs_block {
+    fn free_blocks(&mut self, mut next_block: FATEntry) -> Result<()> {
+        require_fat!(mut self, _p, fat {
             while let FATEntry::Chain(b) = next_block {
                 let b = b as usize;
-                next_block = block[b >> 12].fat[b & 0x0FFF];
-                block[b >> 12].fat[b & 0x0FFF] = FATEntry::Free;
+                next_block = fat.entries[b];
+                fat.entries[b] = FATEntry::Free;
             }
-        }
+
+            Ok(())
+        })
     }
 
-    #[cfg(not(feature = "raw_access"))]
-    pub(crate) fn delete_file(&mut self, filename: &str) -> Result<()> {
+    fn delete_file(&mut self, filename: &str) -> Result<()> {
         let file = match self.get_file(filename)? {
             Some(f) => f,
             None => return Ok(()),
         };
+
         let start = file.start;
         file.clear();
 
-        self.free_blocks(start);
-        Ok(())
+        self.free_blocks(start)
     }
 
-    #[cfg(all(feature = "writing", not(feature = "raw_access")))]
-    pub(super) fn delete_file_and_update(&mut self, filename: &str) -> Result<()> {
-        self.delete_file(filename)?;
-        self.update_fs()
-    }
-
-    #[cfg(not(feature = "raw_access"))]
-    pub(super) fn get_stats(&self) -> Result<(usize, usize, usize, u32)> {
-        if let Some(block) = &self.current_fs_block {
-            let (free, used, bad) = block.iter().fold((0, 0, 0), |i, bl| {
-                bl.fat.iter().fold(i, |(a, b, c), e| match e {
-                    FATEntry::Free => (a + 1, b, c),
-                    FATEntry::BadBlock => (a, b, c + 1),
-                    _ => (a, b + 1, c),
-                })
-            });
-            Ok((free, used, bad, block[0].footer.seqno))
-        } else {
-            Err(LibBBRDBError::NoFSBlock)
-        }
-    }
-
-    fn read_blocks(&self, file: &FileEntry) -> Result<Option<Vec<u8>>> {
-        if let Some(block) = &self.current_fs_block {
-            let mut filebuf = Vec::with_capacity(file.size as usize);
+    fn read_file_blocks(&self, file: &FileEntry) -> Result<Option<Vec<u8>>> {
+        require_fat!(self, _p, fat {
+            let mut filebuf = Vec::with_capacity(file.size());
             let mut next_block = file.start;
-            let bar = ProgressBar::new(file.size.into()).with_style(
+            let bar = ProgressBar::new(file.size() as u64).with_style(
                 ProgressStyle::with_template(
                     "{wide_bar} {bytes}/{total_bytes}, eta {eta} ({binary_bytes_per_sec})",
                 )
                 .unwrap(),
             );
-            while filebuf.len() < file.size as usize
-                && let FATEntry::Chain(b) = next_block
-            {
-                let (read_block, _) = self.read_block_spare(b.into())?;
+
+            while filebuf.len() < file.size() && matches!(next_block, FATEntry::Chain(_)) {
+                let FATEntry::Chain(b) = next_block else {
+                    unreachable!()
+                };
+
+                let (read_block, _) = self.read_blocks_spare(b.into(), 1)?;
                 let to_write =
-                    &read_block[..read_block.len().min(file.size as usize - filebuf.len())];
+                    &read_block[..read_block.len().min(file.size() - filebuf.len())];
                 bar.inc(to_write.len() as u64);
                 filebuf.extend(to_write);
-                next_block = block[(b >> 12) as usize].fat[(b & 0x0FFF) as usize];
+                next_block = fat.entries[b as usize];
             }
+
             Ok(Some(filebuf))
-        } else {
-            Err(LibBBRDBError::NoFSBlock)
+        })
+    }
+
+    fn calc_file_checksum(data: &[u8]) -> u32 {
+        data.iter().fold(0, |a, &e| a.wrapping_add(e as _))
+    }
+
+    fn checksum_file(&self, filename: &str, chksum: u32, size: u32) -> Result<bool> {
+        FileEntry::default().set_name(filename)?;
+
+        let name = CString::new(filename)
+            .map_err(|_| LibBBRDBError::InvalidFilename(filename.to_string()))?;
+        let name = name.as_bytes_with_nul();
+
+        let len = name.len() as u32;
+
+        let mut name = name.to_vec();
+        while name.len() % 4 != 0 {
+            name.push(0);
         }
-    }
+        //let padded_len = (len + 3) & !3;
 
-    #[cfg(not(feature = "raw_access"))]
-    pub(super) fn read_file(&self, filename: &str) -> Result<Option<Vec<u8>>> {
-        let file = match self.find_file(filename)? {
-            Some(f) => f,
-            None => return Ok(None),
+        self.send_command(Command::ChksumFile, len)?;
+        self.write_data(RDBCommand::HostData, name)?;
+
+        let checksum_data = {
+            let mut v = vec![];
+            v.extend(chksum.to_be_bytes());
+            v.extend(size.to_be_bytes());
+            v
         };
-        self.read_blocks(file)
+        self.write_data(RDBCommand::HostData, checksum_data)?;
+
+        let status = self.check_cmd_response(Command::ChksumFile, 1)?[0];
+        println!("status: {}", status as i32);
+        Ok(status == 0)
     }
 
-    fn calculate_file_checksum(data: &[u8]) -> u32 {
-        data.iter().fold(0u32, |a, &e| a.wrapping_add(e as u32))
-    }
-
-    #[cfg(not(feature = "raw_access"))]
-    fn validate_file_write(
-        &mut self,
-        filename: &str,
-        chksum: u32,
-        required_blocks: usize,
-    ) -> Result<bool> {
+    fn validate_file_write(&mut self, filename: &str, chksum: u32, size: u32) -> Result<bool> {
         match self.find_file(filename)? {
-            Some(_) => {
-                if self.file_checksum_cmp(
-                    filename,
-                    chksum,
-                    (required_blocks * BLOCK_SIZE) as u32,
-                )? {
+            Some(f) => {
+                if self.checksum_file(filename, chksum, f.size() as u32)? {
                     Ok(false)
                 } else {
                     let block_count = self.get_file_block_count(filename)?;
-                    self.delete_file(filename)?;
-                    Ok(required_blocks < self.get_free_block_count()? + block_count)
+                    Ok(size < ((self.get_free_block_count()? + block_count) * BLOCK_SIZE) as u32)
                 }
             }
-            None => Ok(required_blocks <= self.get_free_block_count()?),
+            None => Ok(size <= (self.get_free_block_count()? * BLOCK_SIZE) as u32),
         }
     }
 
     #[cfg(feature = "writing")]
-    fn write_file_blocks(
-        &self,
-        data: &[u8],
-        blocks_to_write: &[u16],
-        required_blocks: usize,
-    ) -> Result<()> {
+    fn write_file_blocks(&mut self, data: &[u8], blocks_to_write: &[u16]) -> Result<()> {
         const BLANK_SPARE: [u8; SPARE_SIZE] = [0xFF; SPARE_SIZE];
 
-        assert!(
-            blocks_to_write.iter().all(|e| (0x40..0xFF0).contains(e)),
-            "Trying to write to SKSA or FAT area!"
-        );
+        require_init!(self, player
+        {
+            assert!(
+                blocks_to_write
+                    .iter()
+                    .all(|&e| (0x40..(player.cardsize - NUM_FATS)).contains(&(e as u32))),
+                "Trying to write to reserved area"
+            );
 
-        let chunks = data.chunks(BLOCK_SIZE);
+            let chunks = data.chunks(BLOCK_SIZE);
 
-        if blocks_to_write.len() != chunks.len() || blocks_to_write.len() != required_blocks {
-            return Err(LibBBRDBError::IncorrectNumBlocks(
-                required_blocks,
-                chunks.len(),
-                blocks_to_write.len(),
-            ));
-        }
+            if blocks_to_write.len() != chunks.len() {
+                return Err(LibBBRDBError::IncorrectNumBlocks(
+                    chunks.len(),
+                    blocks_to_write.len(),
+                ));
+            }
 
-        let bar = ProgressBar::new((blocks_to_write.len() * BLOCK_SIZE) as u64).with_style(
-            ProgressStyle::with_template(
-                "{wide_bar} {bytes}/{total_bytes}, eta {eta} ({binary_bytes_per_sec})",
-            )
-            .unwrap(),
-        );
+            let bar = ProgressBar::new(data.len() as u64).with_style(
+                ProgressStyle::with_template(
+                    "{wide_bar} {bytes}/{total_bytes}, eta {eta} ({binary_bytes_per_sec})",
+                )
+                .unwrap(),
+            );
 
-        for (block, &index) in chunks.zip(blocks_to_write) {
-            let mut block = block.to_vec();
-            block.extend(vec![0x00; BLOCK_SIZE - block.len()]);
-            self.write_block_spare(&block, &BLANK_SPARE, index.into())?;
-            bar.inc(BLOCK_SIZE as u64);
-        }
+            for (block, &index) in chunks.zip(blocks_to_write) {
+                let mut block = block.to_vec();
+                block.extend(vec![0x00; BLOCK_SIZE - block.len()]);
+                self.write_blocks_spare(index.into(), &[(&block, &BLANK_SPARE)])?;
+                bar.inc(block.len() as u64);
+            }
 
-        Ok(())
+            Ok(())
+        })
     }
 
-    #[cfg(not(feature = "raw_access"))]
     fn find_blank_file_entry(&mut self) -> Result<&mut FileEntry> {
-        if let Some(block) = &mut self.current_fs_block {
-            for entry in &mut block[0].entries {
+        require_fat!(mut self, _p, fat {
+            for entry in &mut fat.files {
                 if !entry.valid() {
                     return Ok(entry);
                 }
             }
             Err(LibBBRDBError::NoEmptyFileSlots)
-        } else {
-            Err(LibBBRDBError::NoFSBlock)
-        }
+        })
     }
 
-    #[cfg(not(feature = "raw_access"))]
+    #[cfg(feature = "writing")]
     fn write_file_entry(
         &mut self,
         filename: &str,
         start_block: usize,
         filesize: u32,
-    ) -> Result<()> {
+    ) -> Result<&FileEntry> {
         let entry = self.find_blank_file_entry()?;
-        entry.set_filename(filename)?;
+        entry.set_name(filename)?;
         entry.valid = FileValid::Valid;
         entry.start = FATEntry::Chain(start_block as u16);
-        entry.size = filesize;
+        entry.set_size(filesize);
 
-        Ok(())
+        Ok(entry)
     }
 
-    #[cfg(not(feature = "raw_access"))]
     fn find_next_free_block(&self, start_at: usize) -> Result<usize> {
-        if let Some(block) = &self.current_fs_block {
-            for bl in &block[start_at >> 12..] {
-                for (index, i) in bl.fat[start_at & 0x0FFF..].iter().enumerate() {
-                    if matches!(i, FATEntry::Free) {
-                        return Ok(index + start_at);
-                    }
+        require_fat!(self, _p, fat {
+            for (index, i) in fat.entries[start_at..].iter().enumerate() {
+                if matches!(i, FATEntry::Free) {
+                    return Ok(index + start_at);
                 }
             }
             Err(LibBBRDBError::NoFreeBlocks)
-        } else {
-            Err(LibBBRDBError::NoFSBlock)
-        }
+        })
     }
 
-    #[cfg(not(feature = "raw_access"))]
-    fn update_fs_links(&mut self, start_block: usize, required_blocks: usize) -> Result<Vec<u16>> {
-        let mut free_blocks = Vec::with_capacity(required_blocks);
-        free_blocks.push(start_block as u16);
+    #[cfg(feature = "writing")]
+    fn update_fs_links(&mut self, start_block: usize, size: u32) -> Result<Vec<u16>> {
+        require_fat!(self, _p, _f { Ok(()) })?;
+
+        let mut free_blocks = Vec::with_capacity(next_block_size(size) as usize);
         let mut prev = start_block as u16;
+        free_blocks.push(prev);
 
-        let bar = ProgressBar::new(required_blocks as u64).with_style(
-            ProgressStyle::with_template(
-                "{wide_bar} {bytes}/{total_bytes}, eta {eta} ({binary_bytes_per_sec})",
-            )
-            .unwrap(),
-        );
-
-        for _ in 0..required_blocks - 1 {
+        let mut allocated_size = BLOCK_SIZE as u32;
+        while allocated_size < size {
             let next = self.find_next_free_block(prev as usize + 1)? as u16;
             free_blocks.push(next);
-            bar.inc(1);
             prev = next;
+            allocated_size += BLOCK_SIZE as u32;
         }
 
-        bar.inc(1);
-
-        if let Some(block) = &mut self.current_fs_block {
+        require_fat!(mut self, _p, fat {
             let mut current_block = free_blocks[0];
-            for &next_block in &free_blocks[1..free_blocks.len()] {
-                block[(current_block >> 12) as usize].fat[(current_block & 0x0FFF) as usize] =
-                    FATEntry::Chain(next_block);
-
+            for &next_block in &free_blocks[1..] {
+                fat.entries[current_block as usize] = FATEntry::Chain(next_block);
                 current_block = next_block;
             }
-            block[(current_block >> 12) as usize].fat[(current_block & 0x0FFF) as usize] =
-                FATEntry::EndOfChain;
+            fat.entries[current_block as usize] = FATEntry::EndOfChain;
 
             Ok(free_blocks)
-        } else {
-            Err(LibBBRDBError::NoFSBlock)
-        }
+        })
     }
 
-    #[cfg(all(feature = "writing", not(feature = "raw_access")))]
-    fn write_blocks_to_temp_file(&mut self, data: &[u8], required_blocks: usize) -> Result<()> {
-        let start_block = self.find_next_free_block(0x40)?;
-        self.write_file_entry(
-            "temp.tmp",
-            start_block,
-            (required_blocks * BLOCK_SIZE) as u32,
-        )?;
+    #[cfg(feature = "writing")]
+    fn write_blocks_to_temp_file(&mut self, data: &[u8]) -> Result<()> {
+        self.delete_file("temp.tmp")?;
 
-        let blocks_to_write = self.update_fs_links(start_block, required_blocks)?;
-        self.write_file_blocks(data, &blocks_to_write, required_blocks)
+        let start_block = self.find_next_free_block(0x40)?;
+        let size = data.len() as u32;
+
+        let entry = self.write_file_entry("temp.tmp", start_block, size)?;
+        let written_size = entry.size() as u32;
+
+        let blocks_to_write = self.update_fs_links(start_block, written_size)?;
+        self.write_file_blocks(data, &blocks_to_write)
     }
 
     #[cfg(not(feature = "raw_access"))]
@@ -626,30 +677,94 @@ impl BBPlayer {
         &mut self,
         filename: &str,
         chksum: u32,
-        required_blocks: usize,
+        size: u32,
     ) -> Result<()> {
-        if self.file_checksum_cmp("temp.tmp", chksum, (required_blocks * BLOCK_SIZE) as u32)? {
+        self.checksum_file("temp.tmp", chksum, size)?;
+        if true {
             self.rename_file("temp.tmp", filename)
         } else {
             Err(LibBBRDBError::ChecksumFailed(filename.to_string(), chksum))
         }
     }
 
-    #[cfg(all(feature = "writing", not(feature = "raw_access")))]
-    pub(super) fn write_file(&mut self, data: &[u8], filename: &str) -> Result<()> {
-        let chksum = Self::calculate_file_checksum(data);
-        let required_blocks = Self::bytes_to_blocks(data.len());
+    #[cfg(feature = "writing")]
+    #[allow(non_snake_case)]
+    pub fn DeleteFile(&mut self, filename: &str) -> Result<()> {
+        self.delete_file(filename)?;
+        self.update_fs()
+    }
 
-        if !self.validate_file_write(filename, chksum, required_blocks)? {
-            return Ok(());
+    #[cfg(feature = "writing")]
+    #[allow(non_snake_case)]
+    pub fn RenameFile(&mut self, from: &str, to: &str) -> Result<()> {
+        self.rename_file(from, to)?;
+        self.update_fs()
+    }
+
+    #[allow(non_snake_case)]
+    pub fn CardStats(&self) -> Result<CardStats> {
+        require_fat!(self, _p, fat {
+            let (free, used, bad) = fat.entries.iter().fold((0, 0, 0), |(a, b, c), e| match e {
+                FATEntry::Free => (a + 1, b, c),
+                FATEntry::BadBlock => (a, b, c + 1),
+                _ => (a, b + 1, c),
+            });
+
+            Ok(CardStats { free, used, bad, seqno: fat.seqno })
+        })
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ReadFile(&self, filename: &str) -> Result<Option<Vec<u8>>> {
+        let file = match self.find_file(filename)? {
+            Some(f) => f,
+            None => return Ok(None),
         };
-        self.write_blocks_to_temp_file(data, required_blocks)?;
+        self.read_file_blocks(file)
+    }
+
+    #[allow(non_snake_case)]
+    pub fn ListFiles(&self) -> Result<Vec<(String, usize)>> {
+        require_fat!(self, _p, fat {
+            Ok(fat.files.iter().filter_map(|f| if f.valid() { Some((f.format_name(), f.size())) } else { None }).collect())
+        })
+    }
+
+    #[allow(non_snake_case)]
+    pub fn DumpCurrentFS(&self) -> Result<Vec<u8>> {
+        require_fat!(self, _p, fat {
+            let mut data = vec![];
+
+            for block in fat.blocks() {
+                let mut blk = vec![];
+                let mut cursor = Cursor::new(&mut blk);
+                block.write_be(&mut cursor)?;
+
+                fix_fat_checksum(&mut blk);
+
+                data.extend(blk);
+            }
+
+            Ok(data)
+        })
+    }
+
+    #[cfg(feature = "writing")]
+    #[allow(non_snake_case)]
+    pub fn WriteFile(&mut self, data: &[u8], filename: &str) -> Result<()> {
+        let chksum = Self::calc_file_checksum(data);
+        let size = data.len() as u32;
+
+        if !self.validate_file_write(filename, chksum, size)? {
+            return Ok(());
+        }
+
+        self.delete_file(filename)?;
+
+        self.write_blocks_to_temp_file(data)?;
         self.update_fs()?;
 
-        self.check_and_cleanup_temp_file(filename, chksum, required_blocks)?;
-
-        self.update_fs()?;
-
-        Ok(())
+        self.check_and_cleanup_temp_file(filename, chksum, size)?;
+        self.update_fs()
     }
 }

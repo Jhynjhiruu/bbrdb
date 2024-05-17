@@ -1,75 +1,86 @@
 use std::time::Duration;
 
-use rusb::{Device, DeviceHandle, GlobalContext};
+use rusb::{Device, DeviceHandle, DeviceList, GlobalContext, UsbContext};
 
 use crate::{
     constants::{
         BB_PRODUCT_ID, IQUE_VENDOR_ID, RDB_BULK_EP_IN, RDB_BULK_EP_OUT, RDB_CONF_DESCRIPTOR,
-        RDB_INTERFACE,
+        RDB_INTERFACE, RDB_VENDOR_ID,
     },
-    error::{wrap_libusb_error, LibBBRDBError, Result},
-    BBPlayer,
+    error::*,
+    Handle,
 };
 
-impl BBPlayer {
-    pub fn is_bbp(device: &Device<GlobalContext>) -> Result<bool> {
-        let desc = wrap_libusb_error(device.device_descriptor())?;
+pub type GlobalHandle = Handle<GlobalContext>;
 
-        Ok(desc.vendor_id() == IQUE_VENDOR_ID && desc.product_id() == BB_PRODUCT_ID)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RDBType {
+    Retail,
+    Emsmon,
+    Unknown,
+}
+
+pub fn bbp_type<C: UsbContext>(device: &Device<C>) -> Result<RDBType> {
+    let desc = device.device_descriptor()?;
+
+    match (desc.vendor_id(), desc.product_id()) {
+        (IQUE_VENDOR_ID, BB_PRODUCT_ID) => Ok(RDBType::Retail),
+        (RDB_VENDOR_ID, BB_PRODUCT_ID) => Ok(RDBType::Emsmon),
+        _ => Ok(RDBType::Unknown),
+    }
+}
+
+pub fn scan_devices_in<C: UsbContext>(context: C) -> Result<Vec<Device<C>>> {
+    Ok(DeviceList::new_with_context(context)?
+        .iter()
+        .filter(|d| bbp_type(d).is_ok_and(|t| t != RDBType::Unknown))
+        .collect())
+}
+
+pub fn scan_devices() -> Result<Vec<Device<GlobalContext>>> {
+    scan_devices_in(GlobalContext::default())
+}
+
+fn is_correct_descriptor<C: UsbContext>(device: &Device<C>) -> Result<bool> {
+    match device.active_config_descriptor() {
+        Ok(d) => Ok(d.number() == RDB_CONF_DESCRIPTOR),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub(crate) fn open_device<C: UsbContext>(device: &Device<C>) -> Result<DeviceHandle<C>> {
+    let handle = device.open()?;
+
+    #[cfg(not(target_os = "windows"))]
+    if rusb::supports_detach_kernel_driver() && handle.kernel_driver_active(RDB_INTERFACE)? {
+        handle.detach_kernel_driver(RDB_INTERFACE)?;
     }
 
-    fn is_correct_descriptor(device: &Device<GlobalContext>) -> Result<bool> {
-        match device.active_config_descriptor() {
-            Ok(d) => Ok(d.number() == RDB_CONF_DESCRIPTOR),
-            Err(e) => Err(e.into()),
-        }
+    handle.set_active_configuration(RDB_CONF_DESCRIPTOR)?;
+    if !is_correct_descriptor(device)? {
+        return Err(LibBBRDBError::IncorrectDescriptor);
     }
 
-    pub fn open_device(device: &Device<GlobalContext>) -> Result<DeviceHandle<GlobalContext>> {
-        let mut handle = device.open()?;
+    handle.claim_interface(RDB_INTERFACE)?;
+    handle.clear_halt(RDB_BULK_EP_IN)?;
+    handle.clear_halt(RDB_BULK_EP_OUT)?;
 
-        #[cfg(not(target_os = "windows"))]
-        if rusb::supports_detach_kernel_driver() && handle.kernel_driver_active(RDB_INTERFACE)? {
-            handle.detach_kernel_driver(RDB_INTERFACE)?;
-        }
-
-        handle.set_active_configuration(RDB_CONF_DESCRIPTOR)?;
-
-        if !Self::is_correct_descriptor(device)? {
-            return Err(LibBBRDBError::IncorrectDescriptor);
-        }
-
-        handle.claim_interface(RDB_INTERFACE)?;
-        handle.clear_halt(RDB_BULK_EP_IN)?;
-        handle.clear_halt(RDB_BULK_EP_OUT)?;
-
-        if !Self::is_correct_descriptor(device)? {
-            return Err(LibBBRDBError::IncorrectDescriptor);
-        }
-
-        Ok(handle)
+    if !is_correct_descriptor(device)? {
+        return Err(LibBBRDBError::IncorrectDescriptor);
     }
 
-    pub fn close_connection(&mut self) -> Result<()> {
-        self.handle.release_interface(RDB_INTERFACE)?;
-        #[cfg(not(target_os = "windows"))]
-        if rusb::supports_detach_kernel_driver() {
-            self.handle.attach_kernel_driver(RDB_INTERFACE)?;
-        }
-        Ok(())
+    Ok(handle)
+}
+
+impl<C: UsbContext> Handle<C> {
+    pub(crate) fn bulk_transfer_send(&self, data: &[u8], timeout: Duration) -> Result<usize> {
+        //println!("raw send: {data:02X?}");
+        wrap_libusb_error(self.handle.write_bulk(RDB_BULK_EP_OUT, data, timeout))
     }
 
-    pub fn bulk_transfer_send<T: AsRef<[u8]>>(&self, data: T, timeout: Duration) -> Result<usize> {
-        //println!("send {:x?}", data.as_ref());
-        wrap_libusb_error(
-            self.handle
-                .write_bulk(RDB_BULK_EP_OUT, data.as_ref(), timeout),
-        )
-    }
+    pub(crate) fn bulk_transfer_receive(&self, len: usize, timeout: Duration) -> Result<Vec<u8>> {
+        let mut buf = vec![0; len];
 
-    pub fn bulk_transfer_receive(&self, length: usize, timeout: Duration) -> Result<Vec<u8>> {
-        let mut buf = vec![0; length];
-        //println!("expc {length:x}");
         match self.handle.read_bulk(RDB_BULK_EP_IN, &mut buf, timeout) {
             Ok(n) => {
                 //println!("recv {:x?}", &buf[..n]);

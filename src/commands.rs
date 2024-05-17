@@ -1,344 +1,230 @@
-use std::{ffi::CString, iter::repeat};
+use core::num;
+use std::mem::size_of;
 
-use crate::{
-    constants::{BLOCK_CHUNK_SIZE, BLOCK_SIZE, SPARE_SIZE},
-    error::{LibBBRDBError, Result},
-    num_from_arr, BBPlayer,
-};
+use rusb::UsbContext;
 
-use indicatif::ProgressIterator;
+use crate::constants::STATUS_OFFSET;
+use crate::error::*;
+use crate::fs::Fat;
+use crate::rdb::RDBCommand;
+use crate::Handle;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
-#[derive(Debug, Clone, Copy)]
 pub enum Command {
-    #[cfg(feature = "writing")]
+    Ping = 0x01,
+    PowerOff = 0x02,
+
     WriteBlock = 0x06,
     ReadBlock = 0x07,
 
+    ReadDir = 0x08,
+    WriteFile = 0x09,
+    ReadFile = 0x0A,
+    DeleteFile = 0x0B,
+
     ScanBlocks = 0x0D,
 
-    #[cfg(feature = "writing")]
+    RenameFile = 0x0F,
+
     WriteBlockAndSpare = 0x10,
     ReadBlockAndSpare = 0x11,
     InitFS = 0x12,
 
+    SumFile = 0x13,
+
+    FreeBlocks = 0x14,
+
     GetNumBlocks = 0x15,
-    #[cfg(feature = "writing")]
     SetSeqNo = 0x16,
     GetSeqNo = 0x17,
 
-    FileChksum = 0x1C,
+    StatFile = 0x18,
+
+    ReadFileBlock = 0x19,
+    WriteFileBlock = 0x1A,
+
+    CreateFile = 0x1B,
+
+    ChksumFile = 0x1C,
     SetLED = 0x1D,
     SetTime = 0x1E,
     GetBBID = 0x1F,
     SignHash = 0x20,
-
-    #[cfg(feature = "patched")]
-    DumpV2 = 0x21,
 }
 
-pub type BlockSpare = (Vec<u8>, Vec<u8>);
-
-macro_rules! try_continue {
-    ($e:expr) => {
-        match $e {
-            Ok(x) => x,
-            Err(e) => {
-                eprintln!("{e}");
-                continue;
-            }
-        }
-    };
+pub trait CommandArgs {
+    fn encode(self) -> Vec<u8>;
 }
 
-impl BBPlayer {
-    fn command_ret(buf: &[u8]) -> i32 {
-        num_from_arr(&buf[4..8])
+impl CommandArgs for u32 {
+    fn encode(self) -> Vec<u8> {
+        self.to_be_bytes().to_vec()
+    }
+}
+
+impl CommandArgs for Vec<u8> {
+    fn encode(self) -> Vec<u8> {
+        self
+    }
+}
+
+impl CommandArgs for &[u8] {
+    fn encode(self) -> Vec<u8> {
+        self.to_vec()
+    }
+}
+
+impl<C: UsbContext> Handle<C> {
+    fn write_data_len(&self, data: &[u8]) -> Result<()> {
+        let len = data.len();
+        assert!(len <= i32::MAX as usize);
+
+        self.write_data(RDBCommand::HostData, (len as i32).to_be_bytes())?;
+
+        self.write_data(RDBCommand::HostData, data)
     }
 
-    pub(super) fn read_string(&self) -> Result<()> {
-        //self.wait_ready()?;
-        println!("repl: {:02X?}", self.receive_unknown_reply()?);
-        Ok(())
+    pub(crate) fn send_data<T: AsRef<[u8]>>(&self, data: T) -> Result<()> {
+        self.write_data_len(data.as_ref())
     }
 
-    pub(super) fn read_block_spare(&self, block_num: u32) -> Result<BlockSpare> {
-        // attempts
-        for _ in 0..5 {
-            self.request_block_read(Command::ReadBlockAndSpare, block_num)?;
-            let block = try_continue!(self.get_block());
-            let spare = try_continue!(self.get_spare());
-            return Ok((block, spare));
+    pub(crate) fn send_command<T: CommandArgs>(&self, command: Command, args: T) -> Result<()> {
+        let mut data = vec![];
+
+        data.extend((command as u32).to_be_bytes());
+        data.extend(args.encode());
+
+        self.write_data(RDBCommand::HostData, &data)
+    }
+
+    fn get_response(&self, len: usize) -> Result<Vec<u32>> {
+        self.read_data(len).map(|d| {
+            d.chunks(size_of::<u32>())
+                .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
+                .collect()
+        })
+    }
+
+    pub(crate) fn check_cmd_response(&self, command: Command, len: usize) -> Result<Vec<u32>> {
+        let data = self.get_response((len + 1) * size_of::<u32>())?;
+        let c = data.first().map(u32::to_owned).unwrap_or_default();
+        if c != 255 - command as u32 {
+            return Err(LibBBRDBError::IncorrectCmdResponse(c, 255 - command as u32));
         }
-        Err(LibBBRDBError::ReadBlock(block_num))
+
+        Ok(data[1..].to_vec())
     }
 
-    fn request_block_read(&self, command: Command, block_num: u32) -> Result<()> {
-        self.send_command(command as u32, block_num)?;
-        let ret = Self::command_ret(&self.receive_reply(8)?);
-        if ret < 0 {
-            Err(LibBBRDBError::Command(command, ret))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn get_block(&self) -> Result<Vec<u8>> {
-        let mut buf = Vec::with_capacity(BLOCK_SIZE);
-        for _ in 0..(BLOCK_SIZE / BLOCK_CHUNK_SIZE) {
-            buf.extend(self.receive_reply(BLOCK_CHUNK_SIZE)?);
-        }
-        Ok(buf)
-    }
-
-    fn get_spare(&self) -> Result<Vec<u8>> {
-        self.receive_reply(SPARE_SIZE)
-    }
-
-    #[cfg(feature = "writing")]
-    pub(super) fn write_block_spare(
+    pub(crate) fn command_response<T: CommandArgs>(
         &self,
-        block: &[u8],
-        spare: &[u8],
-        block_num: u32,
-    ) -> Result<()> {
-        if spare[5] != 0xFF {
-            // block is marked bad
-            return Ok(());
-        }
-
-        // attempts
-        for _ in 0..5 {
-            try_continue!(self.request_block_write(Command::WriteBlockAndSpare, block_num));
-            try_continue!(self.send_block(block));
-            try_continue!(self.send_spare(spare));
-            try_continue!(self.check_block_write());
-            return Ok(());
-        }
-        Err(LibBBRDBError::WriteBlock(block_num))
+        command: Command,
+        args: T,
+        len: usize,
+    ) -> Result<Vec<u32>> {
+        self.send_command(command, args)?;
+        self.check_cmd_response(command, len)
     }
 
-    #[cfg(feature = "writing")]
-    fn request_block_write(&self, command: Command, block_num: u32) -> Result<()> {
-        self.send_command(command as u32, block_num)?;
-        self.wait_ready()
-    }
+    pub(crate) fn read_blocks(&self, block: u32, num_blocks: u32) -> Result<Vec<u8>> {
+        let mut rv = vec![];
 
-    #[cfg(feature = "writing")]
-    fn check_block_write(&self) -> Result<()> {
-        let ret = Self::command_ret(&self.receive_reply(8)?);
-        if ret < 0 {
-            Err(LibBBRDBError::CheckBlockWrite(ret))
-        } else {
-            Ok(())
-        }
-    }
+        for blk in block..block + num_blocks {
+            let status = self.command_response(Command::ReadBlock, blk, 1)?[0];
+            rv.extend(self.read_data(0x4000)?);
 
-    #[cfg(feature = "writing")]
-    fn send_block(&self, data: &[u8]) -> Result<()> {
-        self.send_chunked_data(data)
-    }
-
-    #[cfg(feature = "writing")]
-    fn send_spare(&self, data: &[u8]) -> Result<()> {
-        self.wait_ready()?;
-        let data = [&data[..3], &[0xFF; SPARE_SIZE - 3]].concat();
-        match self.send_piecemeal_data(data) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
-    }
-
-    #[cfg(not(feature = "raw_access"))]
-    pub(super) fn init_fs(&self) -> Result<()> {
-        self.send_command(Command::InitFS as u32, 0x00)?;
-        let ret = Self::command_ret(&self.receive_reply(8)?);
-        if ret < 0 {
-            Err(LibBBRDBError::InitFS(ret))
-        } else {
-            Ok(())
-        }
-    }
-
-    pub(super) fn get_num_blocks(&self) -> Result<u32> {
-        self.send_command(Command::GetNumBlocks as u32, 0x00)?;
-        let reply = self.receive_reply(8)?;
-        let size: u32 = num_from_arr(&reply[4..8]);
-        Ok(size)
-    }
-
-    #[cfg(feature = "writing")]
-    pub(super) fn set_seqno(&self, arg: u32) -> Result<()> {
-        self.send_command(Command::SetSeqNo as u32, arg)?;
-        self.receive_reply(8)?;
-        Ok(())
-    }
-
-    #[cfg(not(feature = "raw_access"))]
-    pub(super) fn file_checksum_cmp(&self, filename: &str, chksum: u32, size: u32) -> Result<bool> {
-        self.send_filename(filename)?;
-        self.send_params_and_receive_reply(chksum, size)
-    }
-
-    #[cfg(not(feature = "raw_access"))]
-    fn send_filename(&self, filename: &str) -> Result<()> {
-        let split = filename.split('.').collect::<Vec<_>>();
-        let (name, ext) = if split.len() > 1 {
-            (split[0], split[1])
-        } else {
-            (split[0], "")
-        };
-
-        if name.len() > 8 || ext.len() > 3 {
-            return Err(LibBBRDBError::FileNameTooLong(filename.to_string()));
-        }
-
-        let send_buf = match CString::new(filename) {
-            Ok(f) => f,
-            Err(_) => return Err(LibBBRDBError::FileNameCString(filename.to_string())),
-        };
-
-        self.send_command(
-            Command::FileChksum as u32,
-            send_buf.as_bytes_with_nul().len() as u32,
-        )?;
-
-        self.wait_ready()?;
-
-        self.send_piecemeal_data(
-            [
-                send_buf.as_bytes_with_nul(),
-                &vec![0x00u8; (4 - (send_buf.as_bytes_with_nul().len() % 4)) % 4],
-            ]
-            .concat(),
-        )?;
-
-        //self.wait_ready()
-        Ok(())
-    }
-
-    fn send_params_and_receive_reply(&self, chksum: u32, size: u32) -> Result<bool> {
-        self.send_command(chksum, size)?;
-        //self.wait_ready()?;
-        let reply = self.receive_reply(8)?;
-        Ok(num_from_arr::<i32, _>(&reply[4..8]) == 0)
-    }
-
-    pub(super) fn set_led(&self, ledval: u32) -> Result<()> {
-        self.send_command(Command::SetLED as u32, ledval)?;
-        self.receive_reply(8)?;
-        Ok(())
-    }
-
-    pub(super) fn set_time(&self, timedata: [u8; 8]) -> Result<()> {
-        let first_half = num_from_arr(*timedata.split_array_ref::<4>().0);
-        let second_half = &timedata[4..];
-        self.send_command(Command::SetTime as u32, first_half)?;
-        let ret = Self::command_ret(&self.receive_reply(8)?);
-        if ret < 0 {
-            Err(LibBBRDBError::SetTime(ret))
-        } else {
-            self.send_piecemeal_data(second_half)?;
-            Ok(())
-        }
-    }
-
-    pub(super) fn get_bbid(&self) -> Result<u32> {
-        self.send_command(Command::GetBBID as u32, 0x00)?;
-        let reply = self.receive_reply(8)?;
-        let ret = Self::command_ret(&reply);
-        if ret < 0 {
-            Err(LibBBRDBError::GetBBID(ret))
-        } else {
-            Ok(num_from_arr(&reply[4..8]))
-        }
-    }
-
-    fn scan_blocks(&self) -> Result<Vec<bool>> {
-        self.send_command(Command::ScanBlocks as u32, 0x00)?;
-        println!("Waiting for the console to check the blocks...");
-        let length = Self::command_ret(&self.receive_reply(8)?);
-        let reply = self.receive_reply(length as usize)?;
-        Ok(reply.iter().map(|e| e != &0).collect())
-    }
-
-    pub(super) fn dump_nand_and_spare(&self) -> Result<BlockSpare> {
-        let num_blocks = self.get_num_blocks()?;
-        let mut nand = vec![0; num_blocks as usize * BLOCK_SIZE];
-        let mut spare = vec![0; num_blocks as usize * SPARE_SIZE];
-
-        //let bad_blocks = self.scan_blocks()?;
-        //println!("{bad_blocks:?}");
-
-        for block_num in (0..num_blocks).progress().rev() {
-            if false {
-                //bad_blocks[block_num as usize] {
-                eprintln!("Marked bad block: {block_num}");
-                nand[block_num as usize * BLOCK_SIZE..(block_num + 1) as usize * BLOCK_SIZE]
-                    .copy_from_slice(
-                        &repeat(0xBAAD)
-                            .flat_map(|e: u16| e.to_be_bytes())
-                            .take(BLOCK_SIZE)
-                            .collect::<Vec<_>>(),
-                    );
-                spare[block_num as usize * SPARE_SIZE..(block_num + 1) as usize * SPARE_SIZE]
-                    .copy_from_slice(&repeat(0x00).take(SPARE_SIZE).collect::<Vec<_>>());
-            } else {
-                let read = self.read_block_spare(block_num);
-                if let Err(e) = read {
-                    if let LibBBRDBError::LibUSBError(e) = e {
-                        eprintln!("{e}");
-                        return Ok((nand, spare));
-                    }
-
-                    eprintln!("Error reading block {block_num}: {e}");
-                    nand[block_num as usize * BLOCK_SIZE..(block_num + 1) as usize * BLOCK_SIZE]
-                        .copy_from_slice(
-                            &repeat(0xBAAD)
-                                .flat_map(|e: u16| e.to_be_bytes())
-                                .take(BLOCK_SIZE)
-                                .collect::<Vec<_>>(),
-                        );
-                    spare[block_num as usize * SPARE_SIZE..(block_num + 1) as usize * SPARE_SIZE]
-                        .copy_from_slice(&repeat(0x00).take(SPARE_SIZE).collect::<Vec<_>>());
-                } else {
-                    let (dumped_block, dumped_spare) = read.unwrap();
-
-                    nand[block_num as usize * BLOCK_SIZE..(block_num + 1) as usize * BLOCK_SIZE]
-                        .copy_from_slice(&dumped_block);
-                    spare[block_num as usize * SPARE_SIZE..(block_num + 1) as usize * SPARE_SIZE]
-                        .copy_from_slice(&dumped_spare);
-                }
+            if status != 0 {
+                return Err(CardError::from_u32(status).into());
             }
         }
+
+        Ok(rv)
+    }
+
+    pub(crate) fn read_blocks_spare(
+        &self,
+        block: u32,
+        num_blocks: u32,
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        let mut nand = vec![];
+        let mut spare = vec![];
+
+        for blk in block..block + num_blocks {
+            let status = self.command_response(Command::ReadBlockAndSpare, blk, 1)?[0];
+            let n = self.read_data(0x4000)?;
+            let s = self.read_data(0x10)?;
+
+            if s[STATUS_OFFSET].count_zeros() > 1 {
+                return Err(CardError::BadBlock(n, s).into());
+            }
+
+            if status != 0 {
+                return Err(CardError::from_u32(status).into());
+            }
+
+            nand.extend(n);
+            spare.extend(s);
+        }
+
         Ok((nand, spare))
     }
 
-    pub(super) fn read_single_block(&self, block_num: u32) -> Result<BlockSpare> {
-        self.read_block_spare(block_num)
-    }
+    pub(crate) fn write_blocks(&mut self, block: u32, data: &[&[u8]]) -> Result<()> {
+        for (index, nand) in data.iter().enumerate() {
+            let index = index as u32;
 
-    #[cfg(feature = "writing")]
-    pub(super) fn write_single_block(
-        &self,
-        block: &[u8],
-        spare: &[u8],
-        block_num: u32,
-    ) -> Result<()> {
-        self.write_block_spare(block, spare, block_num)
-    }
+            let blk = block + index;
 
-    #[cfg(feature = "patched")]
-    pub(super) fn dump_v2(&mut self) -> Result<()> {
-        use std::fs::write;
+            self.send_command(Command::WriteBlock, blk)?;
+            self.write_data(RDBCommand::HostData, nand)?;
 
-        self.send_command(Command::DumpV2 as u32, 0x00)?;
-        let ret = Self::command_ret(&self.receive_reply(8)?);
-        if ret < 0 {
-            return Err(LibBBRDBError::Command(Command::DumpV2, ret));
+            let status = self.check_cmd_response(Command::WriteBlock, 1)?[0];
+            if status != 0 {
+                return Err(CardError::from_u32(status).into());
+            }
         }
-        let buf = self.receive_reply(0x100)?;
-        write("v2.bin", buf).unwrap();
+
         Ok(())
+    }
+
+    pub(crate) fn write_blocks_spare(&mut self, block: u32, data: &[(&[u8], &[u8])]) -> Result<()> {
+        for (index, (nand, spare)) in data.iter().enumerate() {
+            let index = index as u32;
+
+            let blk = block + index;
+
+            self.send_command(Command::WriteBlockAndSpare, blk)?;
+            self.write_data(RDBCommand::HostData, nand)?;
+            self.write_data(RDBCommand::HostData, spare)?;
+
+            let status = self.check_cmd_response(Command::WriteBlockAndSpare, 1)?[0];
+            if status != 0 {
+                return Err(CardError::from_u32(status).into());
+            }
+        }
+
+        Ok(())
+    }
+
+    #[allow(non_snake_case)]
+    pub(crate) fn SetCardSeqno(&self) -> Result<Option<(Option<Fat>, u32)>> {
+        let resp = self.command_response(Command::SetSeqNo, 1, 1)?;
+        if resp[0] == 0 {
+            return Ok(None);
+        }
+
+        let resp = self.command_response(Command::GetNumBlocks, 0, 1)?;
+
+        let cardsize = if resp[0] % 4096 == 0 {
+            resp[0]
+        } else {
+            return Err(LibBBRDBError::UnhandledCardSize);
+        };
+
+        match self.read_fat(cardsize) {
+            Ok(f) => Ok(Some((Some(f), cardsize))),
+            Err(LibBBRDBError::NoFAT) => Ok(Some((None, cardsize))),
+            Err(e) => Err(e),
+        }
     }
 }

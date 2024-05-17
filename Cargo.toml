@@ -3,21 +3,14 @@ name = "bbrdb"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[lib]
-
 [dependencies]
-binrw = "0.11.1"
-chrono = "0.4.24"
+anyhow = "1.0.83"
+binrw = "0.13.3"
+rusb = "0.9.4"
+thiserror = "1.0.60"
 indicatif = "0.17.3"
-num-traits = "0.2.15"
-#rusb = { path = "D:/GitHub/rusb" }
-rusb = "0.9.1"
-thiserror = "1.0.40"
+chrono = "0.4.38"
 
 [features]
-patched = []
-raw_rdb = []
 writing = []
-raw_access = []
+default = []
