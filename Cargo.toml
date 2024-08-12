@@ -10,6 +10,7 @@ rusb = "0.9.4"
 thiserror = "1.0.60"
 indicatif = "0.17.3"
 chrono = "0.4.38"
+bb = { path = "../bbrs" }
 
 [features]
 writing = []

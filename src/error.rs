@@ -18,6 +18,24 @@ pub enum CardError {
     #[error("Card changed")]
     Changed,
 
+    #[error("FS not initialised")]
+    FSNotInit,
+
+    #[error("File exists")]
+    FileExists,
+
+    #[error("Card full")]
+    CardFull,
+
+    #[error("Not found")]
+    NotFound,
+
+    #[error("Save data invalid")]
+    StateInvalid,
+
+    #[error("Save data limit reached")]
+    StateLimit,
+
     #[error("Unknown card error: {0}")]
     Unknown(i32),
 
@@ -26,14 +44,18 @@ pub enum CardError {
 }
 
 impl CardError {
-    pub fn from_u32(error: u32) -> Self {
-        let error = error as i32;
-
+    pub fn from_i32(error: i32) -> Self {
         match error {
             -1 => Self::NotPresent,
             -2 => Self::Failure,
             -3 => Self::Invalid,
             -4 => Self::Changed,
+            -5 => Self::FSNotInit,
+            -6 => Self::FileExists,
+            -7 => Self::CardFull,
+            -8 => Self::NotFound,
+            -9 => Self::StateInvalid,
+            -10 => Self::StateLimit,
             x => Self::Unknown(x),
         }
     }
@@ -66,7 +88,7 @@ pub enum LibBBRDBError {
     RDBUnhandled(RDBCommand),
 
     #[error("Incorrect command response (got {0:08X}, expected {1:08X})")]
-    IncorrectCmdResponse(u32, u32),
+    IncorrectCmdResponse(i32, i32),
 
     #[error("Console not ready for data")]
     PlayerNotReady,
@@ -109,6 +131,17 @@ pub enum LibBBRDBError {
 
     #[error("Set time: returned {0} (error)")]
     SetTime(i32),
+
+    #[error("Bad SKSA")]
+    BadSKSA,
+
+    #[error("The provided NAND has an incorrect size (got 0x{0:X} bytes, expected 0x{1:X} bytes)")]
+    InvalidNANDSize(usize, usize),
+
+    #[error(
+        "The provided spare has an incorrect size (got 0x{0:X} bytes, expected 0x{1:X} bytes)"
+    )]
+    InvalidSpareSize(usize, usize),
 }
 
 pub(crate) fn wrap_libusb_error<T>(value: rusb::Result<T>) -> Result<T> {

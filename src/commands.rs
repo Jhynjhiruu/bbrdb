@@ -98,19 +98,19 @@ impl<C: UsbContext> Handle<C> {
         self.write_data(RDBCommand::HostData, &data)
     }
 
-    fn get_response(&self, len: usize) -> Result<Vec<u32>> {
+    fn get_response(&self, len: usize) -> Result<Vec<i32>> {
         self.read_data(len).map(|d| {
-            d.chunks(size_of::<u32>())
-                .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
+            d.chunks(size_of::<i32>())
+                .map(|c| i32::from_be_bytes(c.try_into().unwrap()))
                 .collect()
         })
     }
 
-    pub(crate) fn check_cmd_response(&self, command: Command, len: usize) -> Result<Vec<u32>> {
-        let data = self.get_response((len + 1) * size_of::<u32>())?;
-        let c = data.first().map(u32::to_owned).unwrap_or_default();
-        if c != 255 - command as u32 {
-            return Err(LibBBRDBError::IncorrectCmdResponse(c, 255 - command as u32));
+    pub(crate) fn check_cmd_response(&self, command: Command, len: usize) -> Result<Vec<i32>> {
+        let data = self.get_response((len + 1) * size_of::<i32>())?;
+        let c = data.first().map(i32::to_owned).unwrap_or_default();
+        if c != 255 - command as i32 {
+            return Err(LibBBRDBError::IncorrectCmdResponse(c, 255 - command as i32));
         }
 
         Ok(data[1..].to_vec())
@@ -121,7 +121,7 @@ impl<C: UsbContext> Handle<C> {
         command: Command,
         args: T,
         len: usize,
-    ) -> Result<Vec<u32>> {
+    ) -> Result<Vec<i32>> {
         self.send_command(command, args)?;
         self.check_cmd_response(command, len)
     }
@@ -134,7 +134,7 @@ impl<C: UsbContext> Handle<C> {
             rv.extend(self.read_data(0x4000)?);
 
             if status != 0 {
-                return Err(CardError::from_u32(status).into());
+                return Err(CardError::from_i32(status).into());
             }
         }
 
@@ -159,7 +159,7 @@ impl<C: UsbContext> Handle<C> {
             }
 
             if status != 0 {
-                return Err(CardError::from_u32(status).into());
+                return Err(CardError::from_i32(status).into());
             }
 
             nand.extend(n);
@@ -180,7 +180,7 @@ impl<C: UsbContext> Handle<C> {
 
             let status = self.check_cmd_response(Command::WriteBlock, 1)?[0];
             if status != 0 {
-                return Err(CardError::from_u32(status).into());
+                return Err(CardError::from_i32(status).into());
             }
         }
 
@@ -199,7 +199,7 @@ impl<C: UsbContext> Handle<C> {
 
             let status = self.check_cmd_response(Command::WriteBlockAndSpare, 1)?[0];
             if status != 0 {
-                return Err(CardError::from_u32(status).into());
+                return Err(CardError::from_i32(status).into());
             }
         }
 
@@ -207,7 +207,7 @@ impl<C: UsbContext> Handle<C> {
     }
 
     #[allow(non_snake_case)]
-    pub(crate) fn SetCardSeqno(&self) -> Result<Option<(Option<Fat>, u32)>> {
+    pub(crate) fn SetCardSeqno(&mut self) -> Result<Option<(Option<Fat>, u32)>> {
         let resp = self.command_response(Command::SetSeqNo, 1, 1)?;
         if resp[0] == 0 {
             return Ok(None);
@@ -216,7 +216,7 @@ impl<C: UsbContext> Handle<C> {
         let resp = self.command_response(Command::GetNumBlocks, 0, 1)?;
 
         let cardsize = if resp[0] % 4096 == 0 {
-            resp[0]
+            resp[0] as u32
         } else {
             return Err(LibBBRDBError::UnhandledCardSize);
         };
@@ -226,5 +226,12 @@ impl<C: UsbContext> Handle<C> {
             Err(LibBBRDBError::NoFAT) => Ok(Some((None, cardsize))),
             Err(e) => Err(e),
         }
+    }
+
+    #[allow(non_snake_case)]
+    pub(crate) fn GetCardSeqno(&self) -> Result<bool> {
+        let resp = self.command_response(Command::GetSeqNo, 0, 1)?[0];
+
+        Ok(resp == 1)
     }
 }

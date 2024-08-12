@@ -18,7 +18,7 @@ fn main() -> Result<()> {
 
     handle.Init()?;
 
-    println!("initialised: {}", handle.initialised());
+    println!("initialised: {}", handle.initialised()?);
 
     //let bad = handle.ScanBadBlocks()?;
     //println!("{bad:?}");

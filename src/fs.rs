@@ -423,6 +423,15 @@ impl<C: UsbContext> Handle<C> {
         })
     }
 
+    fn init_fs(&self) -> Result<()> {
+        let status = self.command_response(Command::InitFS, 0, 1)?[0];
+        if status != 0 {
+            Err(CardError::from_i32(status).into())
+        } else {
+            Ok(())
+        }
+    }
+
     #[cfg(feature = "writing")]
     fn update_fs(&mut self) -> Result<()> {
         require_fat!(self, player, fat {
@@ -447,7 +456,7 @@ impl<C: UsbContext> Handle<C> {
                 self.write_fat_block(addr, block)?;
             }
 
-            Ok(())
+            self.init_fs()
         })
     }
 
@@ -534,7 +543,6 @@ impl<C: UsbContext> Handle<C> {
         self.write_data(RDBCommand::HostData, checksum_data)?;
 
         let status = self.check_cmd_response(Command::ChksumFile, 1)?[0];
-        println!("status: {}", status as i32);
         Ok(status == 0)
     }
 
@@ -679,8 +687,7 @@ impl<C: UsbContext> Handle<C> {
         chksum: u32,
         size: u32,
     ) -> Result<()> {
-        self.checksum_file("temp.tmp", chksum, size)?;
-        if true {
+        if self.checksum_file("temp.tmp", chksum, size)? {
             self.rename_file("temp.tmp", filename)
         } else {
             Err(LibBBRDBError::ChecksumFailed(filename.to_string(), chksum))
