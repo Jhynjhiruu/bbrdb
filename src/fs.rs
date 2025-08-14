@@ -210,6 +210,7 @@ impl FileEntry {
     }
 
     pub(crate) fn set_name(&mut self, filename: &str) -> Result<()> {
+        let filename = filename.to_lowercase();
         let split = filename.split('.').collect::<Vec<_>>();
         let (name, ext) = if split.len() > 1 {
             (split[0], split[1])
@@ -218,7 +219,7 @@ impl FileEntry {
         };
 
         if name.len() > 8 || ext.len() > 3 {
-            return Err(LibBBRDBError::FileNameTooLong(filename.to_string()));
+            return Err(LibBBRDBError::FileNameTooLong(filename));
         }
 
         self.name
@@ -367,6 +368,7 @@ impl<C: UsbContext> Handle<C> {
     }
 
     fn get_file(&mut self, filename: &str) -> Result<Option<&mut FileEntry>> {
+        let filename = filename.to_lowercase();
         require_fat!(mut self, _p, fat {
             for file in &mut fat.files {
                 if file.valid() && file.format_name() == filename {
@@ -378,6 +380,7 @@ impl<C: UsbContext> Handle<C> {
     }
 
     fn find_file(&self, filename: &str) -> Result<Option<&FileEntry>> {
+        let filename = filename.to_lowercase();
         require_fat!(self, _p, fat {
             for file in &fat.files {
                 if file.valid() && file.format_name() == filename {
@@ -389,13 +392,15 @@ impl<C: UsbContext> Handle<C> {
     }
 
     fn rename_file(&mut self, from: &str, to: &str) -> Result<()> {
+        let from = from.to_lowercase();
+        let to = to.to_lowercase();
         if from == to {
             Ok(())
         } else {
-            self.delete_file(to)?;
-            match self.get_file(from)? {
-                Some(f) => f.set_name(to),
-                None => Err(LibBBRDBError::FileNotFound(from.to_string())),
+            self.delete_file(&to)?;
+            match self.get_file(&from)? {
+                Some(f) => f.set_name(&to),
+                None => Err(LibBBRDBError::FileNotFound(from)),
             }
         }
     }
@@ -405,9 +410,10 @@ impl<C: UsbContext> Handle<C> {
     }
 
     fn get_file_block_count(&self, filename: &str) -> Result<usize> {
-        match self.find_file(filename)? {
+        let filename = filename.to_lowercase();
+        match self.find_file(&filename)? {
             Some(f) => Ok(Self::bytes_to_blocks(f.size as usize)),
-            None => Err(LibBBRDBError::FileNotFound(filename.to_string())),
+            None => Err(LibBBRDBError::FileNotFound(filename)),
         }
     }
 
@@ -473,7 +479,8 @@ impl<C: UsbContext> Handle<C> {
     }
 
     fn delete_file(&mut self, filename: &str) -> Result<()> {
-        let file = match self.get_file(filename)? {
+        let filename = filename.to_lowercase();
+        let file = match self.get_file(&filename)? {
             Some(f) => f,
             None => return Ok(()),
         };
@@ -517,10 +524,11 @@ impl<C: UsbContext> Handle<C> {
     }
 
     fn checksum_file(&self, filename: &str, chksum: u32, size: u32) -> Result<bool> {
-        FileEntry::default().set_name(filename)?;
+        let filename = filename.to_lowercase();
+        FileEntry::default().set_name(&filename)?;
 
-        let name = CString::new(filename)
-            .map_err(|_| LibBBRDBError::InvalidFilename(filename.to_string()))?;
+        let name = CString::new(filename.as_bytes())
+            .map_err(|_| LibBBRDBError::InvalidFilename(filename))?;
         let name = name.as_bytes_with_nul();
 
         let len = name.len() as u32;
@@ -547,16 +555,35 @@ impl<C: UsbContext> Handle<C> {
     }
 
     fn validate_file_write(&mut self, filename: &str, chksum: u32, size: u32) -> Result<bool> {
-        match self.find_file(filename)? {
+        let filename = filename.to_lowercase();
+        match self.find_file(&filename)? {
             Some(f) => {
-                if self.checksum_file(filename, chksum, f.size() as u32)? {
+                if self.checksum_file(&filename, chksum, f.size() as u32)? {
                     Ok(false)
                 } else {
-                    let block_count = self.get_file_block_count(filename)?;
-                    Ok(size < ((self.get_free_block_count()? + block_count) * BLOCK_SIZE) as u32)
+                    let block_count = self.get_file_block_count(&filename)?;
+                    if size < ((self.get_free_block_count()? + block_count) * BLOCK_SIZE) as u32 {
+                        Ok(true)
+                    } else {
+                        Err(LibBBRDBError::FileTooBig(
+                            filename.to_string(),
+                            size,
+                            ((self.get_free_block_count()? + block_count) * BLOCK_SIZE) as u32,
+                        ))
+                    }
                 }
             }
-            None => Ok(size <= (self.get_free_block_count()? * BLOCK_SIZE) as u32),
+            None => {
+                if size <= (self.get_free_block_count()? * BLOCK_SIZE) as u32 {
+                    Ok(true)
+                } else {
+                    Err(LibBBRDBError::FileTooBig(
+                        filename.to_string(),
+                        size,
+                        (self.get_free_block_count()? * BLOCK_SIZE) as u32,
+                    ))
+                }
+            }
         }
     }
 
@@ -618,8 +645,9 @@ impl<C: UsbContext> Handle<C> {
         start_block: usize,
         filesize: u32,
     ) -> Result<&FileEntry> {
+        let filename = filename.to_lowercase();
         let entry = self.find_blank_file_entry()?;
-        entry.set_name(filename)?;
+        entry.set_name(&filename)?;
         entry.valid = FileValid::Valid;
         entry.start = FATEntry::Chain(start_block as u16);
         entry.set_size(filesize);
@@ -687,24 +715,28 @@ impl<C: UsbContext> Handle<C> {
         chksum: u32,
         size: u32,
     ) -> Result<()> {
+        let filename = filename.to_lowercase();
         if self.checksum_file("temp.tmp", chksum, size)? {
-            self.rename_file("temp.tmp", filename)
+            self.rename_file("temp.tmp", &filename)
         } else {
-            Err(LibBBRDBError::ChecksumFailed(filename.to_string(), chksum))
+            Err(LibBBRDBError::ChecksumFailed(filename, chksum))
         }
     }
 
     #[cfg(feature = "writing")]
     #[allow(non_snake_case)]
     pub fn DeleteFile(&mut self, filename: &str) -> Result<()> {
-        self.delete_file(filename)?;
+        let filename = filename.to_lowercase();
+        self.delete_file(&filename)?;
         self.update_fs()
     }
 
     #[cfg(feature = "writing")]
     #[allow(non_snake_case)]
     pub fn RenameFile(&mut self, from: &str, to: &str) -> Result<()> {
-        self.rename_file(from, to)?;
+        let from = from.to_lowercase();
+        let to = to.to_lowercase();
+        self.rename_file(&from, &to)?;
         self.update_fs()
     }
 
@@ -723,7 +755,8 @@ impl<C: UsbContext> Handle<C> {
 
     #[allow(non_snake_case)]
     pub fn ReadFile(&self, filename: &str) -> Result<Option<Vec<u8>>> {
-        let file = match self.find_file(filename)? {
+        let filename = filename.to_lowercase();
+        let file = match self.find_file(&filename)? {
             Some(f) => f,
             None => return Ok(None),
         };
@@ -759,19 +792,22 @@ impl<C: UsbContext> Handle<C> {
     #[cfg(feature = "writing")]
     #[allow(non_snake_case)]
     pub fn WriteFile(&mut self, data: &[u8], filename: &str) -> Result<()> {
+        let filename = filename.to_lowercase();
+
         let chksum = Self::calc_file_checksum(data);
         let size = data.len() as u32;
 
-        if !self.validate_file_write(filename, chksum, size)? {
+        if !self.validate_file_write(&filename, chksum, size)? {
+            println!("Checksum matches existing file");
             return Ok(());
         }
 
-        self.delete_file(filename)?;
+        self.delete_file(&filename)?;
 
         self.write_blocks_to_temp_file(data)?;
         self.update_fs()?;
 
-        self.check_and_cleanup_temp_file(filename, chksum, size)?;
+        self.check_and_cleanup_temp_file(&filename, chksum, size)?;
         self.update_fs()
     }
 }

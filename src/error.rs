@@ -126,6 +126,9 @@ pub enum LibBBRDBError {
     #[error("There are not enough blocks free on the console. Try deleting some files to free up space.")]
     NoFreeBlocks,
 
+    #[error("File \"{0}\" is too big to fit on the console (needed blocks: {0}, free blocks: {0}). Try deleting some files to free up space.")]
+    FileTooBig(String, u32, u32),
+
     #[error("Failed to verify file {0} (expected checksum {1:08X})")]
     ChecksumFailed(String, u32),
 

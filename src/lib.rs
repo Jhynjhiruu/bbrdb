@@ -17,7 +17,7 @@ mod kernel;
 mod rdb;
 mod usb;
 
-use error::*;
+pub use error::*;
 pub use fs::CardStats;
 pub use usb::*;
 
