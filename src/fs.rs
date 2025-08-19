@@ -9,7 +9,6 @@ use binrw::BinResult;
 use binrw::BinWrite;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
-use rusb::UsbContext;
 
 use crate::commands::Command;
 use crate::constants::BLOCK_SIZE;
@@ -304,7 +303,7 @@ pub struct CardStats {
     pub seqno: u32,
 }
 
-impl<C: UsbContext> Handle<C> {
+impl Handle {
     fn write_fat_block(&mut self, block: u32, fs: FSBlock) -> Result<()> {
         let mut data = vec![];
         let mut cursor = Cursor::new(&mut data);
@@ -315,7 +314,7 @@ impl<C: UsbContext> Handle<C> {
         self.write_blocks(block, &[&data])
     }
 
-    fn read_fat_block(&self, block: u32) -> Result<FSBlock> {
+    fn read_fat_block(&mut self, block: u32) -> Result<FSBlock> {
         let (nand, _) = self.read_blocks_spare(block, 1)?;
 
         check_fat_checksum(&nand)?;
@@ -324,7 +323,7 @@ impl<C: UsbContext> Handle<C> {
         Ok(FSBlock::read_be(&mut cursor)?)
     }
 
-    fn find_best_fat(&self, cardsize: u32) -> Result<Fat> {
+    fn find_best_fat(&mut self, cardsize: u32) -> Result<Fat> {
         let mut fat = _Fat::new();
 
         if cardsize == 0 {
@@ -359,7 +358,7 @@ impl<C: UsbContext> Handle<C> {
         }
     }
 
-    pub(crate) fn read_fat(&self, cardsize: u32) -> Result<Fat> {
+    pub(crate) fn read_fat(&mut self, cardsize: u32) -> Result<Fat> {
         let fat = self.find_best_fat(cardsize)?;
 
         fat.check()?;
@@ -379,7 +378,7 @@ impl<C: UsbContext> Handle<C> {
         })
     }
 
-    fn find_file(&self, filename: &str) -> Result<Option<&FileEntry>> {
+    fn find_file(&mut self, filename: &str) -> Result<Option<&FileEntry>> {
         let filename = filename.to_lowercase();
         require_fat!(self, _p, fat {
             for file in &fat.files {
@@ -409,7 +408,7 @@ impl<C: UsbContext> Handle<C> {
         (bytes + BLOCK_SIZE - 1) / BLOCK_SIZE
     }
 
-    fn get_file_block_count(&self, filename: &str) -> Result<usize> {
+    fn get_file_block_count(&mut self, filename: &str) -> Result<usize> {
         let filename = filename.to_lowercase();
         match self.find_file(&filename)? {
             Some(f) => Ok(Self::bytes_to_blocks(f.size as usize)),
@@ -417,7 +416,7 @@ impl<C: UsbContext> Handle<C> {
         }
     }
 
-    fn get_free_block_count(&self) -> Result<usize> {
+    fn get_free_block_count(&mut self) -> Result<usize> {
         require_fat!(self, _p, fat {
             Ok(fat.entries.iter().fold(0, |a, e| {
                 if matches!(e, FATEntry::Free) {
@@ -429,7 +428,7 @@ impl<C: UsbContext> Handle<C> {
         })
     }
 
-    fn init_fs(&self) -> Result<()> {
+    fn init_fs(&mut self) -> Result<()> {
         let status = self.command_response(Command::InitFS, 0, 1)?[0];
         if status != 0 {
             Err(CardError::from_i32(status).into())
@@ -491,8 +490,8 @@ impl<C: UsbContext> Handle<C> {
         self.free_blocks(start)
     }
 
-    fn read_file_blocks(&self, file: &FileEntry) -> Result<Option<Vec<u8>>> {
-        require_fat!(self, _p, fat {
+    fn read_file_blocks(&mut self, file: FileEntry) -> Result<Option<Vec<u8>>> {
+        require_fat!(self, {
             let mut filebuf = Vec::with_capacity(file.size());
             let mut next_block = file.start;
             let bar = ProgressBar::new(file.size() as u64).with_style(
@@ -512,7 +511,7 @@ impl<C: UsbContext> Handle<C> {
                     &read_block[..read_block.len().min(file.size() - filebuf.len())];
                 bar.inc(to_write.len() as u64);
                 filebuf.extend(to_write);
-                next_block = fat.entries[b as usize];
+                next_block = self.device.as_ref().unwrap().fat.as_ref().unwrap().entries[b as usize];
             }
 
             Ok(Some(filebuf))
@@ -523,7 +522,7 @@ impl<C: UsbContext> Handle<C> {
         data.iter().fold(0, |a, &e| a.wrapping_add(e as _))
     }
 
-    fn checksum_file(&self, filename: &str, chksum: u32, size: u32) -> Result<bool> {
+    fn checksum_file(&mut self, filename: &str, chksum: u32, size: u32) -> Result<bool> {
         let filename = filename.to_lowercase();
         FileEntry::default().set_name(&filename)?;
 
@@ -558,6 +557,7 @@ impl<C: UsbContext> Handle<C> {
         let filename = filename.to_lowercase();
         match self.find_file(&filename)? {
             Some(f) => {
+                let f = f.clone();
                 if self.checksum_file(&filename, chksum, f.size() as u32)? {
                     Ok(false)
                 } else {
@@ -655,7 +655,7 @@ impl<C: UsbContext> Handle<C> {
         Ok(entry)
     }
 
-    fn find_next_free_block(&self, start_at: usize) -> Result<usize> {
+    fn find_next_free_block(&mut self, start_at: usize) -> Result<usize> {
         require_fat!(self, _p, fat {
             for (index, i) in fat.entries[start_at..].iter().enumerate() {
                 if matches!(i, FATEntry::Free) {
@@ -741,7 +741,7 @@ impl<C: UsbContext> Handle<C> {
     }
 
     #[allow(non_snake_case)]
-    pub fn CardStats(&self) -> Result<CardStats> {
+    pub fn CardStats(&mut self) -> Result<CardStats> {
         require_fat!(self, _p, fat {
             let (free, used, bad) = fat.entries.iter().fold((0, 0, 0), |(a, b, c), e| match e {
                 FATEntry::Free => (a + 1, b, c),
@@ -754,24 +754,24 @@ impl<C: UsbContext> Handle<C> {
     }
 
     #[allow(non_snake_case)]
-    pub fn ReadFile(&self, filename: &str) -> Result<Option<Vec<u8>>> {
+    pub fn ReadFile(&mut self, filename: &str) -> Result<Option<Vec<u8>>> {
         let filename = filename.to_lowercase();
         let file = match self.find_file(&filename)? {
             Some(f) => f,
             None => return Ok(None),
-        };
+        }.clone();
         self.read_file_blocks(file)
     }
 
     #[allow(non_snake_case)]
-    pub fn ListFiles(&self) -> Result<Vec<(String, usize)>> {
+    pub fn ListFiles(&mut self) -> Result<Vec<(String, usize)>> {
         require_fat!(self, _p, fat {
             Ok(fat.files.iter().filter_map(|f| if f.valid() { Some((f.format_name(), f.size())) } else { None }).collect())
         })
     }
 
     #[allow(non_snake_case)]
-    pub fn DumpCurrentFS(&self) -> Result<Vec<u8>> {
+    pub fn DumpCurrentFS(&mut self) -> Result<Vec<u8>> {
         require_fat!(self, _p, fat {
             let mut data = vec![];
 

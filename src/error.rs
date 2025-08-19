@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use thiserror::Error;
 
 use crate::rdb::RDBCommand;
@@ -63,14 +65,23 @@ impl CardError {
 
 #[derive(Debug, Error)]
 pub enum LibBBRDBError {
-    #[error("libusb error: {0}")]
-    LibUSBError(#[from] rusb::Error),
+    #[error("nusb error: {0}")]
+    NUSBError(#[from] nusb::Error),
+
+    #[error("Transfer error: {0}")]
+    NUSBTransferError(#[from] nusb::transfer::TransferError),
+
+    #[error("Active configuration error: {0}")]
+    NUSBActiveConfigurationError(#[from] nusb::ActiveConfigurationError),
 
     #[error("binrw error: {0}")]
     BinRWError(#[from] binrw::Error),
 
     #[error("IO error: {0}")]
     IOError(#[from] std::io::Error),
+
+    #[error("Timeout after {0:?}")]
+    Timeout(Duration),
 
     #[error("Device not initialised. Did you call Init?")]
     NotInitialised,
@@ -145,8 +156,4 @@ pub enum LibBBRDBError {
         "The provided spare has an incorrect size (got 0x{0:X} bytes, expected 0x{1:X} bytes)"
     )]
     InvalidSpareSize(usize, usize),
-}
-
-pub(crate) fn wrap_libusb_error<T>(value: rusb::Result<T>) -> Result<T> {
-    value.map_err(rusb::Error::into)
 }

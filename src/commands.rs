@@ -1,8 +1,6 @@
 use core::num;
 use std::mem::size_of;
 
-use rusb::UsbContext;
-
 use crate::constants::STATUS_OFFSET;
 use crate::error::*;
 use crate::fs::Fat;
@@ -75,8 +73,8 @@ impl CommandArgs for &[u8] {
     }
 }
 
-impl<C: UsbContext> Handle<C> {
-    fn write_data_len(&self, data: &[u8]) -> Result<()> {
+impl Handle {
+    fn write_data_len(&mut self, data: &[u8]) -> Result<()> {
         let len = data.len();
         assert!(len <= i32::MAX as usize);
 
@@ -85,11 +83,11 @@ impl<C: UsbContext> Handle<C> {
         self.write_data(RDBCommand::HostData, data)
     }
 
-    pub(crate) fn send_data<T: AsRef<[u8]>>(&self, data: T) -> Result<()> {
+    pub(crate) fn send_data<T: AsRef<[u8]>>(&mut self, data: T) -> Result<()> {
         self.write_data_len(data.as_ref())
     }
 
-    pub(crate) fn send_command<T: CommandArgs>(&self, command: Command, args: T) -> Result<()> {
+    pub(crate) fn send_command<T: CommandArgs>(&mut self, command: Command, args: T) -> Result<()> {
         let mut data = vec![];
 
         data.extend((command as u32).to_be_bytes());
@@ -98,7 +96,7 @@ impl<C: UsbContext> Handle<C> {
         self.write_data(RDBCommand::HostData, &data)
     }
 
-    fn get_response(&self, len: usize) -> Result<Vec<i32>> {
+    fn get_response(&mut self, len: usize) -> Result<Vec<i32>> {
         self.read_data(len).map(|d| {
             d.chunks(size_of::<i32>())
                 .map(|c| i32::from_be_bytes(c.try_into().unwrap()))
@@ -106,7 +104,7 @@ impl<C: UsbContext> Handle<C> {
         })
     }
 
-    pub(crate) fn check_cmd_response(&self, command: Command, len: usize) -> Result<Vec<i32>> {
+    pub(crate) fn check_cmd_response(&mut self, command: Command, len: usize) -> Result<Vec<i32>> {
         let data = self.get_response((len + 1) * size_of::<i32>())?;
         let c = data.first().map(i32::to_owned).unwrap_or_default();
         if c != 255 - command as i32 {
@@ -117,7 +115,7 @@ impl<C: UsbContext> Handle<C> {
     }
 
     pub(crate) fn command_response<T: CommandArgs>(
-        &self,
+        &mut self,
         command: Command,
         args: T,
         len: usize,
@@ -126,7 +124,7 @@ impl<C: UsbContext> Handle<C> {
         self.check_cmd_response(command, len)
     }
 
-    pub(crate) fn read_blocks(&self, block: u32, num_blocks: u32) -> Result<Vec<u8>> {
+    pub(crate) fn read_blocks(&mut self, block: u32, num_blocks: u32) -> Result<Vec<u8>> {
         let mut rv = vec![];
 
         for blk in block..block + num_blocks {
@@ -142,7 +140,7 @@ impl<C: UsbContext> Handle<C> {
     }
 
     pub(crate) fn read_blocks_spare(
-        &self,
+        &mut self,
         block: u32,
         num_blocks: u32,
     ) -> Result<(Vec<u8>, Vec<u8>)> {
@@ -229,7 +227,7 @@ impl<C: UsbContext> Handle<C> {
     }
 
     #[allow(non_snake_case)]
-    pub(crate) fn GetCardSeqno(&self) -> Result<bool> {
+    pub(crate) fn GetCardSeqno(&mut self) -> Result<bool> {
         let resp = self.command_response(Command::GetSeqNo, 0, 1)?[0];
 
         Ok(resp == 1)

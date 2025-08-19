@@ -1,12 +1,15 @@
-use std::{iter::repeat, thread::sleep, time::Duration};
+use std::{collections::VecDeque, iter::repeat, thread::sleep, time::Duration};
 
 use chrono::{DateTime, Datelike, TimeZone, Timelike};
 use commands::Command;
 use constants::{BLOCK_SIZE, SPARE_SIZE};
 use fs::Fat;
 use indicatif::ProgressIterator;
+use nusb::{
+    transfer::{Bulk, In, Out},
+    Device, DeviceInfo, Endpoint, Interface,
+};
 use rdb::RDBCommand;
-use rusb::{Device, DeviceHandle, DeviceList, GlobalContext, UsbContext};
 
 mod commands;
 mod constants;
@@ -28,7 +31,7 @@ struct BBPlayer {
 }
 
 impl BBPlayer {
-    fn new<C: UsbContext>(handle: &mut Handle<C>) -> Result<Option<Self>> {
+    fn new(handle: &mut Handle) -> Result<Option<Self>> {
         let status = handle.SetCardSeqno()?;
 
         Ok(status.map(|(fat, cardsize)| Self { fat, cardsize }))
@@ -36,8 +39,13 @@ impl BBPlayer {
 }
 
 #[derive(Debug)]
-pub struct Handle<C: UsbContext> {
-    handle: DeviceHandle<C>,
+pub struct Handle {
+    handle: Device,
+    iface: Interface,
+    ep_in: Endpoint<Bulk, In>,
+    ep_out: Endpoint<Bulk, Out>,
+    buf_in: VecDeque<u8>,
+    buf_out: VecDeque<u8>,
     device: Option<BBPlayer>,
 }
 
@@ -59,6 +67,17 @@ macro_rules! require_init {
             return Err(LibBBRDBError::NotInitialised);
         } else {
             if let Some($p) = &mut $s.device {
+                $c
+            } else {
+                Err(LibBBRDBError::NotInitialised)
+            }
+        }
+    };
+    ($s:expr, $c:block) => {
+        if !$s.initialised()? {
+            return Err(LibBBRDBError::NotInitialised);
+        } else {
+            if $s.device.is_some() {
                 $c
             } else {
                 Err(LibBBRDBError::NotInitialised)
@@ -87,21 +106,36 @@ macro_rules! require_fat {
             }
         })
     };
+    ($s:expr, $c:block) => {
+        require_init!($s, {
+            if $s.device.as_ref().unwrap().fat.is_some() {
+                $c
+            } else {
+                Err(LibBBRDBError::NoFAT)
+            }
+        })
+    };
 }
 
-impl<C: UsbContext> Handle<C> {
-    pub fn new(device: &Device<C>) -> Result<Self> {
+impl Handle {
+    pub fn new(device: &DeviceInfo) -> Result<Self> {
+        let (device, interface, ep_in, ep_out) = open_device(device)?;
         Ok(Self {
-            handle: open_device(device)?,
+            handle: device,
+            iface: interface,
+            ep_in,
+            ep_out,
+            buf_in: VecDeque::new(),
+            buf_out: VecDeque::new(),
             device: None,
         })
     }
 
-    pub fn initialised(&self) -> Result<bool> {
+    pub fn initialised(&mut self) -> Result<bool> {
         Ok(self.device.is_some() && self.GetCardSeqno()?)
     }
 
-    fn check_initialised(&self) -> Result<()> {
+    fn check_initialised(&mut self) -> Result<()> {
         if !self.initialised()? {
             Err(LibBBRDBError::NotInitialised)
         } else {
@@ -109,7 +143,7 @@ impl<C: UsbContext> Handle<C> {
         }
     }
 
-    fn get_num_blocks(&self) -> Result<u32> {
+    fn get_num_blocks(&mut self) -> Result<u32> {
         let resp = self.command_response(Command::GetNumBlocks, 0, 1)?[0];
         if resp < 0 {
             Err(CardError::from_i32(resp).into())
@@ -158,18 +192,17 @@ impl<C: UsbContext> Handle<C> {
     }
 
     #[allow(non_snake_case)]
-    pub fn GetBBID(&self) -> Result<u32> {
+    pub fn GetBBID(&mut self) -> Result<u32> {
         Ok(self.command_response(Command::GetBBID, 0, 1)?[0] as u32)
     }
 
     #[allow(non_snake_case)]
-    pub fn ScanBadBlocks(&self) -> Result<Vec<bool>> {
+    pub fn ScanBadBlocks(&mut self) -> Result<Vec<bool>> {
         let blocks = {
-            let this = &self;
             let command = Command::ScanBlocks;
-            this.send_command(command, 0)?;
+            self.send_command(command, 0)?;
             sleep(Duration::from_secs(10));
-            this.check_cmd_response(command, 1)
+            self.check_cmd_response(command, 1)
         }?[0];
         let blocklist = self.read_data(blocks as usize)?;
 
@@ -177,7 +210,7 @@ impl<C: UsbContext> Handle<C> {
     }
 
     #[allow(non_snake_case)]
-    pub fn DumpNAND(&self) -> Result<Vec<u8>> {
+    pub fn DumpNAND(&mut self) -> Result<Vec<u8>> {
         let num_blocks = if self.initialised()? {
             let Some(player) = &self.device else {
                 unreachable!()
@@ -204,7 +237,7 @@ impl<C: UsbContext> Handle<C> {
     }
 
     #[allow(non_snake_case)]
-    pub fn DumpNANDSpare(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+    pub fn DumpNANDSpare(&mut self) -> Result<(Vec<u8>, Vec<u8>)> {
         let num_blocks = if self.initialised()? {
             let Some(player) = &self.device else {
                 unreachable!()
@@ -330,7 +363,7 @@ impl<C: UsbContext> Handle<C> {
     }
 
     #[allow(non_snake_case)]
-    pub fn ReadSingleBlock(&self, block_num: u32) -> Result<(Vec<u8>, Vec<u8>)> {
+    pub fn ReadSingleBlock(&mut self, block_num: u32) -> Result<(Vec<u8>, Vec<u8>)> {
         self.read_blocks_spare(block_num, 1)
     }
 

@@ -2,8 +2,6 @@ use std::collections::VecDeque;
 use std::mem::size_of;
 use std::time::Duration;
 
-use rusb::UsbContext;
-
 use crate::constants::{RDB_BLOCKS_PER_CHUNK, RDB_BLOCK_SIZE, TIMEOUT};
 use crate::error::*;
 use crate::Handle;
@@ -122,8 +120,8 @@ fn to_u32(data: &[u8]) -> u32 {
     u32::from_be_bytes(v[v.len() - 4..].try_into().unwrap())
 }
 
-impl<C: UsbContext> Handle<C> {
-    fn send_rdb_block_data(&self, data: &[u8]) -> Result<()> {
+impl Handle {
+    fn send_rdb_block_data(&mut self, data: &[u8]) -> Result<()> {
         let cmd = RDBCommand::HostDataB;
 
         //println!("block send: {data:02X?}");
@@ -142,7 +140,7 @@ impl<C: UsbContext> Handle<C> {
         Ok(())
     }
 
-    fn send_rdb_data(&self, cmd: RDBCommand, data: &[u8]) -> Result<()> {
+    fn send_rdb_data(&mut self, cmd: RDBCommand, data: &[u8]) -> Result<()> {
         //println!("send: {data:02X?}");
 
         for chunk in data.chunks(RDB_BLOCKS_PER_CHUNK) {
@@ -159,7 +157,7 @@ impl<C: UsbContext> Handle<C> {
         Ok(())
     }
 
-    pub(crate) fn send_rdb_packets(&self, cmd: RDBCommand, data: &[u8]) -> Result<()> {
+    pub(crate) fn send_rdb_packets(&mut self, cmd: RDBCommand, data: &[u8]) -> Result<()> {
         for chunk in data.chunks(RDB_BLOCK_SIZE * RDB_BLOCKS_PER_CHUNK) {
             let mut buf = Vec::with_capacity(RDB_BLOCK_SIZE * RDB_BLOCKS_PER_CHUNK);
             for packet in chunk.chunks(RDB_BLOCK_SIZE) {
@@ -180,7 +178,7 @@ impl<C: UsbContext> Handle<C> {
         Ok(())
     }
 
-    pub(crate) fn write_data<T: AsRef<[u8]>>(&self, cmd: RDBCommand, data: T) -> Result<()> {
+    pub(crate) fn write_data<T: AsRef<[u8]>>(&mut self, cmd: RDBCommand, data: T) -> Result<()> {
         self.check_player_ready()?;
 
         let data = data.as_ref();
@@ -192,7 +190,7 @@ impl<C: UsbContext> Handle<C> {
         }
     }
 
-    pub(crate) fn read_rdb_packet(&self, timeout: Duration) -> Result<(RDBCommand, Vec<u8>)> {
+    pub(crate) fn read_rdb_packet(&mut self, timeout: Duration) -> Result<(RDBCommand, Vec<u8>)> {
         let data = self.bulk_transfer_receive(1, timeout)?[0];
         //println!("rdb packet: {:02X} {}", data >> 2, data & 3);
         let (cmd, len) = decode_rdb_cmd_len(data)?;
@@ -209,7 +207,7 @@ impl<C: UsbContext> Handle<C> {
         }
     }
 
-    pub(crate) fn read_rdb_bulk(&self, len: usize) -> Result<Vec<u8>> {
+    pub(crate) fn read_rdb_bulk(&mut self, len: usize) -> Result<Vec<u8>> {
         let amount_to_read = ((len + 2) / 3) * 4;
 
         let data = self.bulk_transfer_receive(amount_to_read, TIMEOUT)?;
@@ -226,17 +224,17 @@ impl<C: UsbContext> Handle<C> {
         Ok(rv)
     }
 
-    pub(crate) fn check_player_ready(&self) -> Result<bool> {
+    pub(crate) fn check_player_ready(&mut self) -> Result<bool> {
         self.read_rdb_packet(TIMEOUT)
             .map(|d| d.0 == RDBCommand::DeviceReadyForData)
     }
 
-    fn send_ack(&self) -> Result<()> {
+    fn send_ack(&mut self) -> Result<()> {
         self.bulk_transfer_send(&encode_rdb_packet(RDBCommand::HostDataDone, &[]), TIMEOUT)?;
         Ok(())
     }
 
-    pub(crate) fn read_chunk(&self) -> Result<Vec<u8>> {
+    pub(crate) fn read_chunk(&mut self) -> Result<Vec<u8>> {
         let mut rv = vec![];
 
         let (cmd, data) = self.read_rdb_packet(TIMEOUT)?;
@@ -269,7 +267,7 @@ impl<C: UsbContext> Handle<C> {
         Ok(rv)
     }
 
-    pub(crate) fn read_data(&self, len: usize) -> Result<Vec<u8>> {
+    pub(crate) fn read_data(&mut self, len: usize) -> Result<Vec<u8>> {
         let mut rv = vec![];
 
         while rv.len() < len {

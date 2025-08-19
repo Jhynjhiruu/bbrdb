@@ -3,13 +3,12 @@ use bb::Spare;
 use bb::SpareData;
 use indicatif::ProgressBar;
 use indicatif::ProgressStyle;
-use rusb::UsbContext;
 
 use crate::error::*;
 use crate::Handle;
 
-impl<C: UsbContext> Handle<C> {
-    fn skip_bad_blocks(&self, mut blk: u32, num_blocks: usize) -> Result<(Vec<u8>, Vec<u8>, u32)> {
+impl Handle {
+    fn skip_bad_blocks(&mut self, mut blk: u32, num_blocks: usize) -> Result<(Vec<u8>, Vec<u8>, u32)> {
         let mut nand = vec![];
         let mut spare = vec![];
 
@@ -31,7 +30,7 @@ impl<C: UsbContext> Handle<C> {
         Ok((nand, spare, blk))
     }
 
-    fn read_sk(&self) -> Result<(Vec<u8>, u32)> {
+    fn read_sk(&mut self) -> Result<(Vec<u8>, u32)> {
         let (rv, _, blk) = self.skip_bad_blocks(0, 4)?;
 
         if blk >= 8 {
@@ -41,7 +40,7 @@ impl<C: UsbContext> Handle<C> {
         }
     }
 
-    fn read_sa(&self, blk: u32) -> Result<(Vec<u8>, u32)> {
+    fn read_sa(&mut self, blk: u32) -> Result<(Vec<u8>, u32)> {
         let (mut rv, cmd_spare, _) = self.skip_bad_blocks(blk, 1)?;
 
         let cmd = CmdHead::read_from_buf(&rv[..CmdHead::SIZE])?;
@@ -73,7 +72,7 @@ impl<C: UsbContext> Handle<C> {
     }
 
     #[allow(non_snake_case)]
-    pub fn ReadSKSA(&self) -> Result<Vec<u8>> {
+    pub fn ReadSKSA(&mut self) -> Result<Vec<u8>> {
         let mut rv = vec![];
 
         let (sk, blk) = self.read_sk()?;
