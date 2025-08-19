@@ -53,9 +53,9 @@ pub(crate) fn open_device(
     {
         //handle.detach_kernel_driver(RDB_INTERFACE)?;
         handle.attach_kernel_driver(RDB_INTERFACE)?;
+        handle.set_configuration(RDB_CONF_DESCRIPTOR).wait()?;
     }
 
-    handle.set_configuration(RDB_CONF_DESCRIPTOR).wait()?;
     if !is_correct_descriptor(&handle)? {
         return Err(LibBBRDBError::IncorrectDescriptor);
     }
